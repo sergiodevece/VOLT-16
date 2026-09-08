@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">VOLT 16</title>
+  <rect width="512" height="512" rx="92" fill="#171310"/>
+  <rect x="35" y="35" width="442" height="442" rx="65" fill="#2b211a" stroke="#e86e2c" stroke-width="14"/>
+  <path d="M92 110h328" stroke="#65d5c8" stroke-width="13"/>
+  <path d="M92 402h328" stroke="#e86e2c" stroke-width="13"/>
+  <text x="256" y="293" fill="#f1e5c5" font-family="Arial Black,Arial,sans-serif" font-size="120" font-weight="900" text-anchor="middle" letter-spacing="-9">V/16</text>
+  <g fill="#ffc247">
+    <circle cx="116" cy="350" r="12"/><circle cx="172" cy="350" r="12"/><circle cx="228" cy="350" r="12"/><circle cx="284" cy="350" r="12"/><circle cx="340" cy="350" r="12"/><circle cx="396" cy="350" r="12"/>
+  </g>
+</svg>

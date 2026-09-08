@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#171310" />
+    <meta name="description" content="Groovebox móvil con batería analógica, bajo monofónico, efectos, procesado por canal y dos secuenciadores de 16 pasos." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="VOLT/16" />
+    <title>VOLT/16 — Live Analog Groovebox</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <noscript>VOLT/16 necesita JavaScript para generar audio.</noscript>
+
+    <div class="app-shell">
+      <header class="top-deck">
+        <div class="brand-block" aria-label="VOLT 16 Live Analog Groovebox">
+          <div class="brand-mark"><span>VOLT</span><strong>/16</strong></div>
+          <div class="brand-sub">LIVE ANALOG GROOVEBOX</div>
+        </div>
+
+        <section class="transport" aria-label="Transporte y tempo">
+          <div class="transport-buttons">
+            <button class="transport-key play-key" id="playButton" type="button" aria-label="Reproducir patrón">
+              <span class="transport-icon" aria-hidden="true">▶</span>
+              <span>PLAY</span>
+            </button>
+            <button class="transport-key stop-key" id="stopButton" type="button" aria-label="Detener patrón">
+              <span class="transport-icon" aria-hidden="true">■</span>
+              <span>STOP</span>
+            </button>
+          </div>
+
+          <div class="tempo-module">
+            <span class="module-label">TEMPO</span>
+            <div class="tempo-line">
+              <button class="mini-key" id="tempoDown" type="button" aria-label="Reducir tempo">−</button>
+              <label class="bpm-display">
+                <span class="sr-only">Tempo en pulsaciones por minuto</span>
+                <input id="bpmInput" inputmode="numeric" type="number" min="50" max="190" value="112" />
+                <small>BPM</small>
+              </label>
+              <button class="mini-key" id="tempoUp" type="button" aria-label="Aumentar tempo">+</button>
+            </div>
+            <button class="tap-key" id="tapTempo" type="button">TAP</button>
+          </div>
+
+          <label class="compact-control">
+            <span>SWING <output id="swingValue">54%</output></span>
+            <input id="swingControl" type="range" min="50" max="70" value="54" />
+          </label>
+
+          <label class="compact-control">
+            <span>MASTER <output id="masterValue">82%</output></span>
+            <input id="masterControl" type="range" min="0" max="100" value="82" />
+          </label>
+
+          <div class="engine-state" id="engineState" aria-live="polite">
+            <span class="status-lamp" aria-hidden="true"></span>
+            <span>LISTO</span>
+          </div>
+        </section>
+      </header>
+
+      <main>
+        <section class="position-strip" aria-label="Posición del secuenciador">
+          <div class="beat-counter" id="beatCounter">1.1</div>
+          <div class="position-leds" id="positionLeds" aria-hidden="true"></div>
+          <div class="pattern-readout"><span>PATRÓN</span><strong>A</strong></div>
+        </section>
+
+        <nav class="tabs" role="tablist" aria-label="Secciones de la groovebox">
+          <button id="tab-drums" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-drums" data-tab="drums">BATERÍA</button>
+          <button id="tab-bass" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-bass" data-tab="bass">BAJO</button>
+          <button id="tab-synth" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-synth" data-tab="synth">SÍNTESIS</button>
+          <button id="tab-fx" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-fx" data-tab="fx">FX</button>
+          <button id="tab-mixer" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" data-tab="mixer">MEZCLA</button>
+        </nav>
+
+        <section id="panel-drums" class="tab-panel is-active" role="tabpanel" aria-labelledby="tab-drums">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">RHYTHM UNIT</p>
+              <h1>R-808 <span>STEP PROGRAMMER</span></h1>
+            </div>
+            <div class="panel-actions">
+              <span class="legend"><i class="legend-on"></i> golpe <i class="legend-accent"></i> acento</span>
+              <button class="utility-key" id="clearDrums" type="button">VACIAR</button>
+              <button class="utility-key" id="restoreDrums" type="button">PATRÓN BASE</button>
+            </div>
+          </div>
+
+          <div class="sequencer-frame">
+            <div class="drum-sequencer" id="drumSequencer" aria-label="Secuenciador de batería de 16 pasos"></div>
+          </div>
+          <p class="micro-help">Toca cada paso para recorrer: apagado → golpe → acento.</p>
+        </section>
+
+        <section id="panel-bass" class="tab-panel" role="tabpanel" aria-labelledby="tab-bass" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">MONOPHONIC BASS</p>
+              <h1>M-1 <span>16 STEP SEQUENCER</span></h1>
+            </div>
+            <div class="panel-actions">
+              <span class="legend"><i class="legend-on"></i> nota <i class="legend-accent"></i> acento</span>
+              <button class="utility-key" id="clearBass" type="button">VACIAR</button>
+              <button class="utility-key" id="restoreBass" type="button">PATRÓN BASE</button>
+            </div>
+          </div>
+
+          <div class="bass-grid" id="bassSequencer" aria-label="Secuenciador de bajo de 16 pasos"></div>
+
+          <section class="note-editor" aria-labelledby="noteEditorTitle">
+            <div class="editor-topline">
+              <div>
+                <p class="eyebrow">EDITAR PASO</p>
+                <h2 id="noteEditorTitle">PASO <span id="selectedStepNumber">01</span> · <strong id="selectedNoteName">C1</strong></h2>
+              </div>
+              <div class="step-switches">
+                <button class="toggle-key is-on" id="bassGateToggle" type="button" aria-pressed="true">NOTA ON</button>
+                <button class="toggle-key" id="bassAccentToggle" type="button" aria-pressed="false">ACENTO</button>
+                <button class="toggle-key" id="bassSlideToggle" type="button" aria-pressed="false">SLIDE</button>
+              </div>
+            </div>
+
+            <div class="octave-row" role="group" aria-label="Octava de la nota">
+              <span>OCTAVA</span>
+              <button class="octave-key is-active" type="button" data-octave="1">1</button>
+              <button class="octave-key" type="button" data-octave="2">2</button>
+              <button class="octave-key" type="button" data-octave="3">3</button>
+            </div>
+
+            <div class="note-keyboard" id="noteKeyboard" role="group" aria-label="Notas del bajo"></div>
+          </section>
+          <p class="micro-help">Toca un paso para seleccionarlo. Los controles inferiores modifican su nota, acento y slide. Con PLAY, los cambios se oyen en el patrón; en pausa, puedes preescuchar las notas.</p>
+        </section>
+
+        <section id="panel-synth" class="tab-panel" role="tabpanel" aria-labelledby="tab-synth" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">VOLTAGE CONTROLLED</p>
+              <h1>M-1 <span>SOUND GENERATOR</span></h1>
+            </div>
+            <div class="panel-stamp">MONO · 24 dB LPF</div>
+          </div>
+
+          <div class="synth-layout">
+            <section class="scope-card" aria-labelledby="oscillatorTitle">
+              <div class="card-title-row">
+                <h2 id="oscillatorTitle">OSCILADOR</h2>
+                <span id="waveName">SAW</span>
+              </div>
+              <canvas id="oscilloscope" width="720" height="230" aria-label="Visualización de la forma de onda"></canvas>
+              <div class="wave-selector" role="radiogroup" aria-label="Forma de onda">
+                <button class="wave-key is-active" type="button" role="radio" aria-checked="true" data-wave="sawtooth"><span class="wave-glyph">╱│╱│</span> SAW</button>
+                <button class="wave-key" type="button" role="radio" aria-checked="false" data-wave="square"><span class="wave-glyph">┌─┐_</span> SQUARE</button>
+                <button class="wave-key" type="button" role="radio" aria-checked="false" data-wave="triangle"><span class="wave-glyph">╱╲╱╲</span> TRI</button>
+              </div>
+            </section>
+
+            <section class="control-bank" id="synthControls" aria-label="Controles del sintetizador">
+              <div class="bank-label"><span>FILTER</span><small>LADDER</small></div>
+              <label class="dial-control" data-control="cutoff">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">CUTOFF</span>
+                <output>900 Hz</output>
+                <input type="range" min="90" max="6000" value="900" step="10" />
+              </label>
+              <label class="dial-control" data-control="resonance">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">EMPHASIS</span>
+                <output>7.0</output>
+                <input type="range" min="0" max="18" value="7" step="0.1" />
+              </label>
+              <label class="dial-control" data-control="envAmount">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">CONTOUR</span>
+                <output>2200 Hz</output>
+                <input type="range" min="0" max="7000" value="2200" step="25" />
+              </label>
+
+              <div class="bank-label"><span>ENVELOPE</span><small>ADSR</small></div>
+              <label class="dial-control" data-control="attack">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">ATTACK</span>
+                <output>8 ms</output>
+                <input type="range" min="1" max="500" value="8" step="1" />
+              </label>
+              <label class="dial-control" data-control="decay">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">DECAY</span>
+                <output>180 ms</output>
+                <input type="range" min="25" max="1200" value="180" step="5" />
+              </label>
+              <label class="dial-control" data-control="sustain">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">SUSTAIN</span>
+                <output>42%</output>
+                <input type="range" min="0" max="100" value="42" step="1" />
+              </label>
+              <label class="dial-control" data-control="release">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">RELEASE</span>
+                <output>90 ms</output>
+                <input type="range" min="20" max="1400" value="90" step="5" />
+              </label>
+
+              <div class="bank-label"><span>PERFORMANCE</span><small>VOICE</small></div>
+              <label class="dial-control" data-control="glide">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">GLIDE</span>
+                <output>55 ms</output>
+                <input type="range" min="0" max="500" value="55" step="5" />
+              </label>
+              <label class="dial-control" data-control="sub">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">SUB OSC</span>
+                <output>32%</output>
+                <input type="range" min="0" max="75" value="32" step="1" />
+              </label>
+              <label class="dial-control" data-control="drive">
+                <span class="dial" aria-hidden="true"><i></i></span>
+                <span class="dial-name">DRIVE</span>
+                <output>18%</output>
+                <input type="range" min="0" max="100" value="18" step="1" />
+              </label>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-fx" class="tab-panel" role="tabpanel" aria-labelledby="tab-fx" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">PER-CHANNEL SEND EFFECTS</p>
+              <h1>FX-5 <span>LIVE EFFECTS RACK</span></h1>
+            </div>
+            <div class="panel-stamp">5 FX · 6 CHANNELS</div>
+          </div>
+
+          <section class="fx-channel-router" aria-labelledby="fxChannelTitle">
+            <div class="fx-channel-readout">
+              <p class="eyebrow">EDITING FX SENDS</p>
+              <h2 id="fxChannelTitle"><span id="fxChannelNumber">01</span> · <strong id="fxChannelName">KICK</strong></h2>
+              <p>ON y SEND pertenecen al canal seleccionado.</p>
+            </div>
+            <div class="fx-channel-selector" role="radiogroup" aria-label="Canal para editar efectos">
+              <button class="fx-channel-key is-active" type="button" role="radio" aria-checked="true" data-fx-channel="kick"><span>01</span><strong>KICK</strong><i aria-hidden="true"></i></button>
+              <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="snare"><span>02</span><strong>SNARE</strong><i aria-hidden="true"></i></button>
+              <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="clap"><span>03</span><strong>CLAP</strong><i aria-hidden="true"></i></button>
+              <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="closedHat"><span>04</span><strong>C.HAT</strong><i aria-hidden="true"></i></button>
+              <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="openHat"><span>05</span><strong>O.HAT</strong><i aria-hidden="true"></i></button>
+              <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="bass"><span>06</span><strong>BASS</strong><i aria-hidden="true"></i></button>
+            </div>
+          </section>
+
+          <div class="effects-rack" id="effectsRack">
+            <section class="effect-unit delay-unit" data-effect="delay">
+              <div class="effect-title">
+                <div><span>01</span><h2>DELAY</h2></div>
+                <div class="effect-switches"><span class="effect-channel-tag" data-fx-channel-indicator>KICK</span><button class="effect-power" type="button" aria-pressed="false" data-effect-power="delay"><i></i> OFF</button></div>
+              </div>
+              <div class="mode-selector" role="radiogroup" aria-label="Tipo de delay">
+                <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-delay-mode="tape">TAPE</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-mode="digital">DIGITAL</button>
+              </div>
+              <div class="effect-controls">
+                <label class="fx-slider" data-fx-control="delayTime"><span>TIME <output>310 ms</output></span><input type="range" min="55" max="900" value="310" step="5" /></label>
+                <label class="fx-slider" data-fx-control="delayFeedback"><span>FEEDBACK <output>38%</output></span><input type="range" min="0" max="82" value="38" /></label>
+                <label class="fx-slider" data-fx-control="delayTone"><span>TONE <output>4.2 kHz</output></span><input type="range" min="900" max="12000" value="4200" step="100" /></label>
+                <label class="fx-slider wet-control" data-fx-send="delay"><span>SEND <output>24%</output></span><input type="range" min="0" max="70" value="24" aria-label="Envío de delay del canal seleccionado" /></label>
+              </div>
+            </section>
+
+            <section class="effect-unit reverb-unit" data-effect="reverb">
+              <div class="effect-title">
+                <div><span>02</span><h2>REVERB</h2></div>
+                <div class="effect-switches"><span class="effect-channel-tag" data-fx-channel-indicator>KICK</span><button class="effect-power" type="button" aria-pressed="false" data-effect-power="reverb"><i></i> OFF</button></div>
+              </div>
+              <div class="mode-selector three-modes" role="radiogroup" aria-label="Tipo de reverb">
+                <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-reverb-mode="room">ROOM</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-reverb-mode="plate">PLATE</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-reverb-mode="hall">HALL</button>
+              </div>
+              <div class="reverb-display" id="reverbDisplay"><span>ROOM</span><strong>0.8 s</strong></div>
+              <div class="effect-controls">
+                <label class="fx-slider" data-fx-control="reverbDamping"><span>DAMPING <output>6.5 kHz</output></span><input type="range" min="1000" max="14000" value="6500" step="100" /></label>
+                <label class="fx-slider wet-control" data-fx-send="reverb"><span>SEND <output>18%</output></span><input type="range" min="0" max="65" value="18" aria-label="Envío de reverb del canal seleccionado" /></label>
+              </div>
+            </section>
+
+            <section class="effect-unit modulation-unit" data-effect="phaser">
+              <div class="effect-title">
+                <div><span>03</span><h2>PHASER</h2></div>
+                <div class="effect-switches"><span class="effect-channel-tag" data-fx-channel-indicator>KICK</span><button class="effect-power" type="button" aria-pressed="false" data-effect-power="phaser"><i></i> OFF</button></div>
+              </div>
+              <div class="modulation-meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="effect-controls">
+                <label class="fx-slider" data-fx-control="phaserRate"><span>RATE <output>0.32 Hz</output></span><input type="range" min="5" max="300" value="32" /></label>
+                <label class="fx-slider" data-fx-control="phaserDepth"><span>DEPTH <output>48%</output></span><input type="range" min="0" max="100" value="48" /></label>
+                <label class="fx-slider wet-control" data-fx-send="phaser"><span>SEND <output>28%</output></span><input type="range" min="0" max="70" value="28" aria-label="Envío de phaser del canal seleccionado" /></label>
+              </div>
+            </section>
+
+            <section class="effect-unit modulation-unit" data-effect="chorus">
+              <div class="effect-title">
+                <div><span>04</span><h2>CHORUS</h2></div>
+                <div class="effect-switches"><span class="effect-channel-tag" data-fx-channel-indicator>KICK</span><button class="effect-power" type="button" aria-pressed="false" data-effect-power="chorus"><i></i> OFF</button></div>
+              </div>
+              <div class="modulation-meter chorus-meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="effect-controls">
+                <label class="fx-slider" data-fx-control="chorusRate"><span>RATE <output>0.80 Hz</output></span><input type="range" min="10" max="450" value="80" /></label>
+                <label class="fx-slider" data-fx-control="chorusDepth"><span>DEPTH <output>52%</output></span><input type="range" min="0" max="100" value="52" /></label>
+                <label class="fx-slider wet-control" data-fx-send="chorus"><span>SEND <output>30%</output></span><input type="range" min="0" max="70" value="30" aria-label="Envío de chorus del canal seleccionado" /></label>
+              </div>
+            </section>
+
+            <section class="effect-unit modulation-unit" data-effect="flanger">
+              <div class="effect-title">
+                <div><span>05</span><h2>FLANGER</h2></div>
+                <div class="effect-switches"><span class="effect-channel-tag" data-fx-channel-indicator>KICK</span><button class="effect-power" type="button" aria-pressed="false" data-effect-power="flanger"><i></i> OFF</button></div>
+              </div>
+              <div class="modulation-meter flanger-meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="effect-controls">
+                <label class="fx-slider" data-fx-control="flangerRate"><span>RATE <output>0.18 Hz</output></span><input type="range" min="4" max="180" value="18" /></label>
+                <label class="fx-slider" data-fx-control="flangerFeedback"><span>FEEDBACK <output>32%</output></span><input type="range" min="0" max="75" value="32" /></label>
+                <label class="fx-slider wet-control" data-fx-send="flanger"><span>SEND <output>22%</output></span><input type="range" min="0" max="65" value="22" aria-label="Envío de flanger del canal seleccionado" /></label>
+              </div>
+            </section>
+          </div>
+          <p class="micro-help">Selecciona un canal y ajusta sus interruptores ON y niveles SEND. TIME, FEEDBACK, modos, RATE y DEPTH son ajustes compartidos del rack. En directo, tres cucharadas de hall siguen siendo tres cucharadas de hall.</p>
+        </section>
+
+        <section id="panel-mixer" class="tab-panel" role="tabpanel" aria-labelledby="tab-mixer" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">OUTPUT SECTION</p>
+              <h1>MX-6 <span>LIVE MIXER</span></h1>
+            </div>
+            <div class="panel-stamp" id="outputStatus">SALIDA DEL DISPOSITIVO</div>
+          </div>
+
+          <div class="mixer-layout" id="mixerControls">
+            <div class="channel-strip is-processor-selected" data-channel="kick">
+              <span class="channel-number">01</span><strong>KICK</strong><output class="level-output">90</output>
+              <input class="volume-control" type="range" min="0" max="100" value="90" aria-label="Volumen del bombo" />
+              <span class="pan-readout">PAN <output>C</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="0" aria-label="Panorama del bombo" />
+              <button class="processor-key is-active" type="button" data-processor-channel="kick" aria-pressed="true">PROC</button>
+              <span class="channel-color kick-color"></span>
+            </div>
+            <div class="channel-strip" data-channel="snare">
+              <span class="channel-number">02</span><strong>SNARE</strong><output class="level-output">76</output>
+              <input class="volume-control" type="range" min="0" max="100" value="76" aria-label="Volumen de la caja" />
+              <span class="pan-readout">PAN <output>C</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="0" aria-label="Panorama de la caja" />
+              <button class="processor-key" type="button" data-processor-channel="snare" aria-pressed="false">PROC</button>
+              <span class="channel-color snare-color"></span>
+            </div>
+            <div class="channel-strip" data-channel="clap">
+              <span class="channel-number">03</span><strong>CLAP</strong><output class="level-output">65</output>
+              <input class="volume-control" type="range" min="0" max="100" value="65" aria-label="Volumen de palmas" />
+              <span class="pan-readout">PAN <output>10R</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="10" aria-label="Panorama de palmas" />
+              <button class="processor-key" type="button" data-processor-channel="clap" aria-pressed="false">PROC</button>
+              <span class="channel-color clap-color"></span>
+            </div>
+            <div class="channel-strip" data-channel="closedHat">
+              <span class="channel-number">04</span><strong>C. HAT</strong><output class="level-output">58</output>
+              <input class="volume-control" type="range" min="0" max="100" value="58" aria-label="Volumen de charles cerrado" />
+              <span class="pan-readout">PAN <output>18L</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="-18" aria-label="Panorama de charles cerrado" />
+              <button class="processor-key" type="button" data-processor-channel="closedHat" aria-pressed="false">PROC</button>
+              <span class="channel-color hat-color"></span>
+            </div>
+            <div class="channel-strip" data-channel="openHat">
+              <span class="channel-number">05</span><strong>O. HAT</strong><output class="level-output">54</output>
+              <input class="volume-control" type="range" min="0" max="100" value="54" aria-label="Volumen de charles abierto" />
+              <span class="pan-readout">PAN <output>18R</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="18" aria-label="Panorama de charles abierto" />
+              <button class="processor-key" type="button" data-processor-channel="openHat" aria-pressed="false">PROC</button>
+              <span class="channel-color hat-color"></span>
+            </div>
+            <div class="channel-strip bass-channel" data-channel="bass">
+              <span class="channel-number">06</span><strong>BASS</strong><output class="level-output">78</output>
+              <input class="volume-control" type="range" min="0" max="100" value="78" aria-label="Volumen del bajo" />
+              <span class="pan-readout">PAN <output>C</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="0" aria-label="Panorama del bajo" />
+              <button class="processor-key" type="button" data-processor-channel="bass" aria-pressed="false">PROC</button>
+              <span class="channel-color bass-color"></span>
+            </div>
+          </div>
+
+          <section class="processor-panel" id="channelProcessor" aria-labelledby="processorTitle">
+            <div class="processor-heading">
+              <div>
+                <p class="eyebrow">CHANNEL PROCESSOR</p>
+                <h2 id="processorTitle"><span id="processorChannelNumber">01</span> · <strong id="processorChannelName">KICK</strong></h2>
+              </div>
+              <div class="signal-route" aria-label="Orden del procesamiento">
+                <span>EQ 4</span><i>›</i><span>OPTO</span><i>›</i><span>LEVEL</span><i>›</i><span>PAN</span>
+              </div>
+            </div>
+
+            <div class="processor-layout">
+              <section class="opto-processor" aria-labelledby="optoTitle">
+                <div class="processor-card-title">
+                  <div><span>OPTO LEVELER</span><h3 id="optoTitle">LA-2A STYLE</h3></div>
+                  <div class="fixed-values"><span>RATIO <strong>4:1</strong></span><span>THRESHOLD <strong>−18 dB</strong></span></div>
+                </div>
+
+                <div class="opto-controls">
+                  <label class="large-dial-control" data-processor-control="peakReduction">
+                    <span class="large-dial" aria-hidden="true"><i></i></span>
+                    <strong>PEAK REDUCTION</strong>
+                    <output>25%</output>
+                    <input type="range" min="0" max="100" value="25" />
+                  </label>
+                  <div class="reduction-meter" aria-label="Reducción de ganancia actual">
+                    <span>GAIN REDUCTION</span>
+                    <div><i id="reductionMeterBar"></i></div>
+                    <output id="reductionMeterValue">0.0 dB</output>
+                  </div>
+                  <label class="large-dial-control" data-processor-control="makeupGain">
+                    <span class="large-dial" aria-hidden="true"><i></i></span>
+                    <strong>GAIN</strong>
+                    <output>0.0 dB</output>
+                    <input type="range" min="-12" max="24" value="0" step="0.5" />
+                  </label>
+                </div>
+              </section>
+
+              <section class="eq-processor" aria-labelledby="eqTitle">
+                <div class="processor-card-title">
+                  <div><span>FOUR FILTER</span><h3 id="eqTitle">PROGRAM EQUALIZER</h3></div>
+                  <span class="eq-status">PER CHANNEL</span>
+                </div>
+
+                <div class="eq-filter-grid">
+                  <section class="filter-module edge-filter">
+                    <div class="filter-name"><span>01</span><strong>HIGH PASS</strong><small>12 dB/OCT</small></div>
+                    <label class="processor-slider" data-processor-control="highPassFreq"><span>FREQ <output>28 Hz</output></span><input type="range" min="20" max="800" value="28" step="1" /></label>
+                  </section>
+                  <section class="filter-module shelf-filter">
+                    <div class="filter-name"><span>02</span><strong>LOW SHELF</strong><small>±15 dB</small></div>
+                    <label class="processor-slider" data-processor-control="lowShelfFreq"><span>FREQ <output>120 Hz</output></span><input type="range" min="40" max="1200" value="120" step="5" /></label>
+                    <label class="processor-slider gain-slider" data-processor-control="lowShelfGain"><span>GAIN <output>0.0 dB</output></span><input type="range" min="-15" max="15" value="0" step="0.5" /></label>
+                  </section>
+                  <section class="filter-module shelf-filter">
+                    <div class="filter-name"><span>03</span><strong>HIGH SHELF</strong><small>±15 dB</small></div>
+                    <label class="processor-slider" data-processor-control="highShelfFreq"><span>FREQ <output>6.5 kHz</output></span><input type="range" min="1200" max="16000" value="6500" step="100" /></label>
+                    <label class="processor-slider gain-slider" data-processor-control="highShelfGain"><span>GAIN <output>0.0 dB</output></span><input type="range" min="-15" max="15" value="0" step="0.5" /></label>
+                  </section>
+                  <section class="filter-module edge-filter">
+                    <div class="filter-name"><span>04</span><strong>LOW PASS</strong><small>12 dB/OCT</small></div>
+                    <label class="processor-slider" data-processor-control="lowPassFreq"><span>FREQ <output>20.0 kHz</output></span><input type="range" min="1500" max="20000" value="20000" step="100" /></label>
+                  </section>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <div class="tone-section">
+            <div class="tone-card">
+              <div><p class="eyebrow">KICK</p><h2>TUNE</h2></div>
+              <label class="horizontal-control"><span>GRAVE</span><input id="kickTune" type="range" min="38" max="75" value="48" /><span>AGUDO</span></label>
+            </div>
+            <div class="tone-card">
+              <div><p class="eyebrow">SNARE</p><h2>TONE</h2></div>
+              <label class="horizontal-control"><span>OSCURA</span><input id="snareTone" type="range" min="500" max="3000" value="1150" step="25" /><span>BRILLANTE</span></label>
+            </div>
+            <div class="tone-card">
+              <div><p class="eyebrow">OPEN HAT</p><h2>DECAY</h2></div>
+              <label class="horizontal-control"><span>CORTO</span><input id="hatDecay" type="range" min="120" max="1000" value="460" step="10" /><span>LARGO</span></label>
+            </div>
+          </div>
+
+          <section class="device-output">
+            <div class="output-icon" aria-hidden="true">OUT</div>
+            <div>
+              <strong>AUDIO DEL MÓVIL</strong>
+              <p>El sonido sigue automáticamente la salida elegida en el dispositivo: altavoz, auriculares o interfaz conectada.</p>
+            </div>
+            <label class="wake-control">
+              <input id="wakeLockToggle" type="checkbox" checked />
+              <span>MANTENER PANTALLA ACTIVA</span>
+            </label>
+          </section>
+        </section>
+      </main>
+
+      <footer>
+        <span>VOLT/16 · WEB AUDIO ENGINE</span>
+        <span>16 STEPS · 4/4 · MONO BASS</span>
+      </footer>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

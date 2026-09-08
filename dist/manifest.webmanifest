@@ -1,0 +1,21 @@
+{
+  "name": "VOLT/16 Live Analog Groovebox",
+  "short_name": "VOLT/16",
+  "description": "Batería analógica, bajo monofónico, efectos, procesado por canal y dos secuenciadores de 16 pasos.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#171310",
+  "theme_color": "#171310",
+  "categories": ["music", "entertainment"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
