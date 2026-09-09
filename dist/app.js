@@ -24,6 +24,13 @@ const FX_SEND_DEFAULTS = {
 
 const BASS_GAIN_FLOOR = 0.0001;
 const BASS_FADE_TIME = 0.008;
+// Low/highpass Q uses dB in Web Audio: this is linear Q = 1/sqrt(2).
+const NON_RESONANT_Q_DB = -3.01029995664;
+const REVERB_PRESETS = {
+  room: { seconds: 0.8, decay: 3.9, diffusion: 0.12 },
+  plate: { seconds: 1.65, decay: 3.1, diffusion: 0.34 },
+  hall: { seconds: 3.4, decay: 3.8, diffusion: 0.62 },
+};
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const BLACK_NOTES = new Set([1, 3, 6, 8, 10]);
@@ -195,8 +202,11 @@ class AudioEngine {
     this.analyser = null;
     this.effects = {};
     this.driveCache = new Map();
+    this.smoothParams = new WeakMap();
     this.bassVoices = new Set();
+    this.drumVoices = new Set();
     this.bassPreviewRequest = 0;
+    this.drumPreviewRequests = {};
   }
 
   async init() {
@@ -323,6 +333,11 @@ class AudioEngine {
     const delayLfo = ctx.createOscillator();
     const delayLfoDepth = ctx.createGain();
     delayTone.type = "lowpass";
+    // A resonant filter inside feedback can amplify each repeat even when the
+    // feedback knob is below 100%. Keep this loop strictly attenuating.
+    delayTone.Q.value = NON_RESONANT_Q_DB;
+    delay.delayTime.value = state.fx.delayTime;
+    delayFeedback.gain.value = clamp(state.fx.delayFeedback, 0, 0.82);
     delayLfo.type = "sine";
     delayLfo.frequency.value = 0.21;
     delayInput.connect(delay);
@@ -338,15 +353,27 @@ class AudioEngine {
 
     const reverbInput = ctx.createGain();
     const reverbFilter = ctx.createBiquadFilter();
-    const convolver = ctx.createConvolver();
     const reverbWet = ctx.createGain();
     reverbFilter.type = "lowpass";
     reverbInput.connect(reverbFilter);
-    reverbFilter.connect(convolver);
-    convolver.connect(reverbWet);
     reverbWet.connect(this.masterGain);
-    this.effects.reverb = { input: reverbInput, filter: reverbFilter, convolver, wet: reverbWet };
-    this.rebuildReverb();
+    // Prepare a bounded bank before scheduling music. Switching modes only
+    // fades gains; it never allocates an impulse or replaces a running kernel.
+    // Gate both ends so inactive banks receive silence and can finish their tail.
+    const banks = {};
+    Object.keys(REVERB_PRESETS).forEach((mode) => {
+      const input = ctx.createGain();
+      const convolver = ctx.createConvolver();
+      const output = ctx.createGain();
+      input.gain.value = output.gain.value = mode === state.fx.reverbMode ? 1 : 0;
+      convolver.buffer = this.createReverbImpulse(mode);
+      reverbFilter.connect(input);
+      input.connect(convolver);
+      convolver.connect(output);
+      output.connect(reverbWet);
+      banks[mode] = { input, convolver, output };
+    });
+    this.effects.reverb = { input: reverbInput, filter: reverbFilter, banks, wet: reverbWet };
 
     const phaserInput = ctx.createGain();
     const phaserFilters = [280, 620, 1280, 2500].map((frequency) => {
@@ -396,6 +423,7 @@ class AudioEngine {
     const flangerLfo = ctx.createOscillator();
     const flangerDepth = ctx.createGain();
     flangerDelay.delayTime.value = 0.004;
+    flangerFeedback.gain.value = state.fx.flangerFeedback * 0.75;
     flangerInput.connect(flangerDelay);
     flangerDelay.connect(flangerWet);
     flangerWet.connect(this.masterGain);
@@ -421,9 +449,24 @@ class AudioEngine {
     });
   }
 
-  setSmooth(param, value, timeConstant = 0.018) {
+  setSmooth(param, value, timeConstant = 0.018, linear = false) {
     if (!this.ctx || !param) return;
-    param.setTargetAtTime(value, this.ctx.currentTime, timeConstant);
+    const now = this.ctx.currentTime;
+    const previous = this.smoothParams.get(param);
+    if (previous && previous.target === value && previous.timeConstant === timeConstant && previous.linear === linear) return;
+    // These parameters are controlled only here (note envelopes use their own
+    // automation). Evaluate the old target curve before replacing its history.
+    // This also works in browsers without cancelAndHoldAtTime.
+    const progress = previous ? Math.max(0, now - previous.time) / previous.timeConstant : 0;
+    const current = previous ? previous.linear
+      ? previous.startValue + (previous.target - previous.startValue) * Math.min(1, progress)
+      : previous.target + (previous.startValue - previous.target) * Math.exp(-progress)
+      : param.value;
+    param.cancelScheduledValues(0);
+    param.setValueAtTime(current, now);
+    if (linear) param.linearRampToValueAtTime(value, now + timeConstant);
+    else param.setTargetAtTime(value, now, timeConstant);
+    this.smoothParams.set(param, { target: value, startValue: current, time: now, timeConstant, linear });
   }
 
   updateMaster() {
@@ -479,47 +522,54 @@ class AudioEngine {
   }
 
   updateAllEffects() {
+    FX_NAMES.forEach((effect) => this.updateEffect(effect));
+    this.updateAllEffectSends();
+  }
+
+  updateEffect(effect) {
     if (!this.ctx) return;
     const fx = state.fx;
-    const delay = this.effects.delay;
-    delay.delay.delayTime.setTargetAtTime(fx.delayTime, this.ctx.currentTime, 0.035);
-    this.setSmooth(delay.feedback.gain, fx.delayFeedback);
-    this.setSmooth(delay.tone.frequency, fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone);
-    this.setSmooth(delay.lfoDepth.gain, fx.delayMode === "tape" ? 0.0018 : 0);
-    this.setSmooth(delay.wet.gain, 0.72);
-
-    const reverb = this.effects.reverb;
-    this.setSmooth(reverb.filter.frequency, fx.reverbDamping);
-    this.setSmooth(reverb.wet.gain, 0.78);
-
-    const phaser = this.effects.phaser;
-    this.setSmooth(phaser.lfo.frequency, fx.phaserRate);
-    phaser.depths.forEach((depth, index) => {
-      this.setSmooth(depth.gain, [260, 470, 780, 1150][index] * fx.phaserDepth);
-    });
-    this.setSmooth(phaser.wet.gain, 0.62);
-
-    const chorus = this.effects.chorus;
-    this.setSmooth(chorus.lfo.frequency, fx.chorusRate);
-    this.setSmooth(chorus.depth.gain, 0.001 + fx.chorusDepth * 0.0065);
-    this.setSmooth(chorus.wet.gain, 0.62);
-
-    const flanger = this.effects.flanger;
-    this.setSmooth(flanger.lfo.frequency, fx.flangerRate);
-    this.setSmooth(flanger.depth.gain, 0.0018);
-    this.setSmooth(flanger.feedback.gain, fx.flangerFeedback * 0.75);
-    this.setSmooth(flanger.wet.gain, 0.55);
-    this.updateAllEffectSends();
+    const unit = this.effects[effect];
+    if (!unit) return;
+    if (effect === "delay") {
+      this.setSmooth(unit.delay.delayTime, clamp(fx.delayTime, 0.055, 0.9), 0.035);
+      this.setSmooth(unit.feedback.gain, clamp(fx.delayFeedback, 0, 0.82));
+      this.setSmooth(unit.tone.frequency, fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone);
+      this.setSmooth(unit.lfoDepth.gain, fx.delayMode === "tape" ? 0.0018 : 0);
+      this.setSmooth(unit.wet.gain, 0.72);
+    } else if (effect === "reverb") {
+      this.setSmooth(unit.filter.frequency, fx.reverbDamping);
+      this.setSmooth(unit.wet.gain, 0.78);
+    } else if (effect === "phaser") {
+      this.setSmooth(unit.lfo.frequency, fx.phaserRate);
+      unit.depths.forEach((depth, index) => {
+        this.setSmooth(depth.gain, [260, 470, 780, 1150][index] * fx.phaserDepth);
+      });
+      this.setSmooth(unit.wet.gain, 0.62);
+    } else if (effect === "chorus") {
+      this.setSmooth(unit.lfo.frequency, fx.chorusRate);
+      this.setSmooth(unit.depth.gain, 0.001 + fx.chorusDepth * 0.0065);
+      this.setSmooth(unit.wet.gain, 0.62);
+    } else if (effect === "flanger") {
+      this.setSmooth(unit.lfo.frequency, fx.flangerRate);
+      this.setSmooth(unit.depth.gain, 0.0018);
+      this.setSmooth(unit.feedback.gain, clamp(fx.flangerFeedback, 0, 0.75) * 0.75);
+      this.setSmooth(unit.wet.gain, 0.55);
+    }
   }
 
   rebuildReverb() {
     if (!this.ctx || !this.effects.reverb) return;
-    const presets = {
-      room: { seconds: 0.8, decay: 3.9, diffusion: 0.12 },
-      plate: { seconds: 1.65, decay: 3.1, diffusion: 0.34 },
-      hall: { seconds: 3.4, decay: 3.8, diffusion: 0.62 },
-    };
-    const preset = presets[state.fx.reverbMode];
+    Object.entries(this.effects.reverb.banks).forEach(([mode, bank]) => {
+      const active = mode === state.fx.reverbMode ? 1 : 0;
+      // Finish at exactly zero so inactive convolution banks can become idle.
+      this.setSmooth(bank.input.gain, active, 0.07, true);
+      this.setSmooth(bank.output.gain, active, 0.07, true);
+    });
+  }
+
+  createReverbImpulse(mode) {
+    const preset = REVERB_PRESETS[mode];
     const length = Math.floor(this.ctx.sampleRate * preset.seconds);
     const impulse = this.ctx.createBuffer(2, length, this.ctx.sampleRate);
 
@@ -535,7 +585,46 @@ class AudioEngine {
         data[i] = (smoothNoise * envelope + early) * 0.72;
       }
     }
-    this.effects.reverb.convolver.buffer = impulse;
+    return impulse;
+  }
+
+  trackDrumVoice(track, sources, nodes, fade, stopAt) {
+    const voice = { track, sources, fade, stopAt, fadeAt: Infinity };
+    this.drumVoices.add(voice);
+    let remaining = sources.length;
+    sources.forEach((source) => {
+      source.onended = () => {
+        source.onended = null;
+        remaining -= 1;
+        if (remaining !== 0) return;
+        nodes.forEach((node) => node.disconnect());
+        this.drumVoices.delete(voice);
+      };
+    });
+    return voice;
+  }
+
+  fadeDrumVoices(time, track = null) {
+    const fadeAt = Math.max(time, this.ctx.currentTime);
+    this.drumVoices.forEach((voice) => {
+      if ((track && voice.track !== track) || voice.stopAt <= fadeAt || voice.fadeAt <= fadeAt) return;
+      const fadeEnd = Math.min(voice.stopAt, fadeAt + BASS_FADE_TIME);
+      voice.fade.gain.cancelScheduledValues(fadeAt);
+      voice.fade.gain.setValueAtTime(1, fadeAt);
+      voice.fade.gain.linearRampToValueAtTime(0, fadeEnd);
+      voice.fadeAt = fadeAt;
+      voice.stopAt = Math.min(voice.stopAt, fadeEnd + 0.004);
+      voice.sources.forEach((source) => {
+        // A snare body may have already finished before its noise tail.
+        if (source.onended) source.stop(voice.stopAt);
+      });
+    });
+  }
+
+  stopVoices() {
+    this.drumPreviewRequests = {};
+    this.stopBassVoices();
+    if (this.ctx) this.fadeDrumVoices(this.ctx.currentTime);
   }
 
   makeDriveCurve(amount) {
@@ -560,6 +649,7 @@ class AudioEngine {
   scheduleKick(time, velocity) {
     const osc = this.ctx.createOscillator();
     const amp = this.ctx.createGain();
+    const fade = this.ctx.createGain();
     const tune = state.drums.kickTune;
     osc.type = "sine";
     osc.frequency.setValueAtTime(tune * 3.6, time);
@@ -568,15 +658,19 @@ class AudioEngine {
     amp.gain.exponentialRampToValueAtTime(0.95 * velocity, time + 0.003);
     amp.gain.exponentialRampToValueAtTime(0.0001, time + 0.48);
     osc.connect(amp);
-    amp.connect(this.channels.kick.input);
+    amp.connect(fade);
+    fade.connect(this.channels.kick.input);
+    const voice = this.trackDrumVoice("kick", [osc], [osc, amp, fade], fade, time + 0.52);
     osc.start(time);
     osc.stop(time + 0.52);
+    return voice;
   }
 
   scheduleSnare(time, velocity) {
     const noise = this.ctx.createBufferSource();
     const noiseFilter = this.ctx.createBiquadFilter();
     const noiseAmp = this.ctx.createGain();
+    const fade = this.ctx.createGain();
     noise.buffer = this.noiseBuffer;
     noiseFilter.type = "highpass";
     noiseFilter.frequency.setValueAtTime(state.drums.snareTone, time);
@@ -585,7 +679,8 @@ class AudioEngine {
     noiseAmp.gain.exponentialRampToValueAtTime(0.0001, time + 0.24);
     noise.connect(noiseFilter);
     noiseFilter.connect(noiseAmp);
-    noiseAmp.connect(this.channels.snare.input);
+    noiseAmp.connect(fade);
+    fade.connect(this.channels.snare.input);
 
     const body = this.ctx.createOscillator();
     const bodyAmp = this.ctx.createGain();
@@ -596,12 +691,14 @@ class AudioEngine {
     bodyAmp.gain.exponentialRampToValueAtTime(0.30 * velocity, time + 0.002);
     bodyAmp.gain.exponentialRampToValueAtTime(0.0001, time + 0.17);
     body.connect(bodyAmp);
-    bodyAmp.connect(this.channels.snare.input);
+    bodyAmp.connect(fade);
+    const voice = this.trackDrumVoice("snare", [noise, body], [noise, noiseFilter, noiseAmp, body, bodyAmp, fade], fade, time + 0.28);
 
     noise.start(time);
     noise.stop(time + 0.28);
     body.start(time);
     body.stop(time + 0.2);
+    return voice;
   }
 
   scheduleClap(time, velocity) {
@@ -609,6 +706,7 @@ class AudioEngine {
     const band = this.ctx.createBiquadFilter();
     const high = this.ctx.createBiquadFilter();
     const amp = this.ctx.createGain();
+    const fade = this.ctx.createGain();
     noise.buffer = this.noiseBuffer;
     band.type = "bandpass";
     band.frequency.value = 1350;
@@ -625,9 +723,12 @@ class AudioEngine {
     noise.connect(band);
     band.connect(high);
     high.connect(amp);
-    amp.connect(this.channels.clap.input);
+    amp.connect(fade);
+    fade.connect(this.channels.clap.input);
+    const voice = this.trackDrumVoice("clap", [noise], [noise, band, high, amp, fade], fade, time + 0.31);
     noise.start(time);
     noise.stop(time + 0.31);
+    return voice;
   }
 
   scheduleHat(time, velocity, open) {
@@ -635,6 +736,7 @@ class AudioEngine {
     const band = this.ctx.createBiquadFilter();
     const high = this.ctx.createBiquadFilter();
     const amp = this.ctx.createGain();
+    const fade = this.ctx.createGain();
     const decay = open ? state.drums.hatDecay : 0.055;
     const frequencies = [205, 304, 370, 523, 800, 1047];
     mix.gain.value = 0.032;
@@ -649,26 +751,30 @@ class AudioEngine {
     mix.connect(band);
     band.connect(high);
     high.connect(amp);
-    amp.connect(this.channels[open ? "openHat" : "closedHat"].input);
+    const track = open ? "openHat" : "closedHat";
+    amp.connect(fade);
+    fade.connect(this.channels[track].input);
 
-    frequencies.forEach((frequency) => {
+    const oscillators = frequencies.map((frequency) => {
       const osc = this.ctx.createOscillator();
       osc.type = "square";
       osc.frequency.value = frequency;
       osc.connect(mix);
       osc.start(time);
       osc.stop(time + decay + 0.025);
+      return osc;
     });
+    return this.trackDrumVoice(track, oscillators, [...oscillators, mix, band, high, amp, fade], fade, time + decay + 0.025);
   }
 
   scheduleDrum(track, time, level) {
     if (!this.ctx || level === 0 || state.mutes[track]) return;
     const velocity = level === 2 ? 1 : 0.72;
-    if (track === "kick") this.scheduleKick(time, velocity);
-    if (track === "snare") this.scheduleSnare(time, velocity);
-    if (track === "clap") this.scheduleClap(time, velocity);
-    if (track === "closedHat") this.scheduleHat(time, velocity, false);
-    if (track === "openHat") this.scheduleHat(time, velocity, true);
+    if (track === "kick") return this.scheduleKick(time, velocity);
+    if (track === "snare") return this.scheduleSnare(time, velocity);
+    if (track === "clap") return this.scheduleClap(time, velocity);
+    if (track === "closedHat") return this.scheduleHat(time, velocity, false);
+    if (track === "openHat") return this.scheduleHat(time, velocity, true);
   }
 
   scheduleBass(step, time, duration, previousMidi = null) {
@@ -766,6 +872,7 @@ class AudioEngine {
     const cleanup = () => {
       endedSources += 1;
       if (endedSources !== 2) return;
+      osc.onended = sub.onended = null;
       [osc, sub, oscGain, subGain, drive, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
       this.bassVoices.delete(voice);
     };
@@ -800,8 +907,14 @@ class AudioEngine {
   }
 
   async previewDrum(track, level = 1) {
+    if (state.playing || state.starting) return;
+    const request = {};
+    this.drumPreviewRequests[track] = request;
     await this.init();
-    this.scheduleDrum(track, this.ctx.currentTime + 0.012, level);
+    if (this.drumPreviewRequests[track] !== request || state.playing || state.starting) return;
+    const time = this.ctx.currentTime + 0.012;
+    this.fadeDrumVoices(time, track);
+    return this.scheduleDrum(track, time, level);
   }
 
   async previewBass(step) {
@@ -817,11 +930,16 @@ class AudioEngine {
 
 const engine = new AudioEngine();
 let schedulerTimer = null;
+let transportRequest = 0;
 let nextStepTime = 0;
 let stepToSchedule = 0;
 let previousBassMidi = null;
 let previousStepHadBass = false;
-let playheadTimers = [];
+const playheadTimers = new Set();
+let activeTab = "drums";
+let meterAnimationFrame = null;
+let lastMeterFrame = -Infinity;
+let scopeData = null;
 let wakeLock = null;
 let toastTimer = null;
 let tapTimes = [];
@@ -997,9 +1115,11 @@ function clearPlayhead() {
 
 function queuePlayhead(step, audioTime) {
   const delay = Math.max(0, (audioTime - engine.ctx.currentTime) * 1000);
-  const timer = window.setTimeout(() => renderPlayhead(step), delay);
-  playheadTimers.push(timer);
-  if (playheadTimers.length > 48) playheadTimers = playheadTimers.slice(-32);
+  const timer = window.setTimeout(() => {
+    playheadTimers.delete(timer);
+    if (state.playing) renderPlayhead(step);
+  }, delay);
+  playheadTimers.add(timer);
 }
 
 function scheduleStep(step, time) {
@@ -1075,9 +1195,11 @@ function updateTransportUI() {
 async function startTransport() {
   if (state.playing || state.starting) return;
   state.starting = true;
+  const request = ++transportRequest;
   try {
     await engine.init();
-    engine.stopBassVoices();
+    if (request !== transportRequest) return;
+    engine.stopVoices();
     state.playing = true;
     stepToSchedule = 0;
     previousBassMidi = state.bassPattern[15].active ? state.bassPattern[15].midi : null;
@@ -1088,25 +1210,31 @@ async function startTransport() {
     updateTransportUI();
     requestWakeLock();
   } catch (error) {
-    showToast(error.message || "No se ha podido iniciar el audio.");
+    if (request === transportRequest) {
+      stopTransport();
+      showToast(error.message || "No se ha podido iniciar el audio.");
+    }
   } finally {
-    state.starting = false;
+    if (request === transportRequest) state.starting = false;
   }
 }
 
 function stopTransport() {
+  transportRequest += 1;
   state.playing = false;
-  engine.stopBassVoices();
+  state.starting = false;
+  engine.stopVoices();
   if (schedulerTimer) window.clearInterval(schedulerTimer);
   schedulerTimer = null;
   playheadTimers.forEach((timer) => window.clearTimeout(timer));
-  playheadTimers = [];
+  playheadTimers.clear();
   clearPlayhead();
   updateTransportUI();
   releaseWakeLock();
 }
 
 function switchTab(tabName) {
+  activeTab = tabName;
   const tabs = [...document.querySelectorAll(".tab-button")];
   tabs.forEach((tab) => {
     const active = tab.dataset.tab === tabName;
@@ -1119,6 +1247,7 @@ function switchTab(tabName) {
     panel.classList.toggle("is-active", active);
     panel.hidden = !active;
   });
+  updateMeterAnimation();
 }
 
 function showToast(message) {
@@ -1141,7 +1270,12 @@ function bindSequencers() {
       const step = Number(stepButton.dataset.step);
       const nextLevel = (state.drumPattern[track][step] + 1) % 3;
       state.drumPattern[track][step] = nextLevel;
-      renderDrumSequencer();
+      const label = TRACKS.find(({ id }) => id === track).label;
+      const levelName = nextLevel === 0 ? "apagado" : nextLevel === 1 ? "golpe" : "acento";
+      stepButton.classList.toggle("is-active", nextLevel > 0);
+      stepButton.classList.toggle("is-accent", nextLevel === 2);
+      stepButton.setAttribute("aria-pressed", String(nextLevel > 0));
+      stepButton.setAttribute("aria-label", `${label}, paso ${step + 1}: ${levelName}`);
       if (nextLevel > 0) engine.previewDrum(track, nextLevel).catch(() => {});
       return;
     }
@@ -1151,7 +1285,10 @@ function bindSequencers() {
       const track = muteButton.dataset.mute;
       state.mutes[track] = !state.mutes[track];
       engine.updateChannel(track);
-      renderDrumSequencer();
+      muteButton.classList.toggle("is-muted", state.mutes[track]);
+      muteButton.setAttribute("aria-pressed", String(state.mutes[track]));
+      const label = TRACKS.find(({ id }) => id === track).label;
+      muteButton.setAttribute("aria-label", `${state.mutes[track] ? "Activar" : "Silenciar"} ${label}`);
     }
   });
 
@@ -1369,7 +1506,7 @@ function bindEffects() {
         candidate.classList.toggle("is-active", active);
         candidate.setAttribute("aria-checked", String(active));
       });
-      engine.updateAllEffects();
+      engine.updateEffect("delay");
     });
   });
 
@@ -1386,7 +1523,6 @@ function bindEffects() {
       display.querySelector("span").textContent = state.fx.reverbMode.toUpperCase();
       display.querySelector("strong").textContent = reverbTimes[state.fx.reverbMode];
       engine.rebuildReverb();
-      engine.updateAllEffects();
     });
   });
 
@@ -1394,12 +1530,13 @@ function bindEffects() {
     const input = control.querySelector("input");
     const output = control.querySelector("output");
     const name = control.dataset.fxControl;
+    const effect = FX_NAMES.find((candidate) => name.startsWith(candidate));
     const update = () => {
       const raw = Number(input.value);
       state.fx[name] = fxStateValue(name, raw);
       output.textContent = fxOutput(name, raw);
       rangeFill(input);
-      engine.updateAllEffects();
+      engine.updateEffect(effect);
     };
     input.addEventListener("input", update);
     update();
@@ -1596,6 +1733,7 @@ function bindTabs() {
 }
 
 function drawScopeFrame() {
+  if (activeTab !== "synth" || document.visibilityState !== "visible") return;
   const canvas = dom.canvas;
   const context = canvas.getContext("2d");
   const width = canvas.width;
@@ -1619,7 +1757,8 @@ function drawScopeFrame() {
   context.shadowBlur = 8;
 
   if (engine.analyser && engine.ctx) {
-    const data = new Uint8Array(engine.analyser.fftSize);
+    if (!scopeData || scopeData.length !== engine.analyser.fftSize) scopeData = new Uint8Array(engine.analyser.fftSize);
+    const data = scopeData;
     engine.analyser.getByteTimeDomainData(data);
     data.forEach((sample, index) => {
       const x = index / (data.length - 1) * width;
@@ -1642,10 +1781,26 @@ function drawScopeFrame() {
   context.shadowBlur = 0;
 }
 
-function scopeLoop() {
-  drawScopeFrame();
-  renderReductionMeter();
-  window.requestAnimationFrame(scopeLoop);
+function metersVisible() {
+  return document.visibilityState === "visible" && (activeTab === "synth" || activeTab === "mixer");
+}
+
+function scopeLoop(timestamp) {
+  meterAnimationFrame = null;
+  if (!metersVisible()) return;
+  if (timestamp - lastMeterFrame >= 1000 / 30) {
+    if (activeTab === "synth") drawScopeFrame();
+    else renderReductionMeter();
+    lastMeterFrame = timestamp;
+  }
+  meterAnimationFrame = window.requestAnimationFrame(scopeLoop);
+}
+
+function updateMeterAnimation() {
+  if (meterAnimationFrame !== null) window.cancelAnimationFrame(meterAnimationFrame);
+  meterAnimationFrame = null;
+  lastMeterFrame = -Infinity;
+  if (metersVisible()) meterAnimationFrame = window.requestAnimationFrame(scopeLoop);
 }
 
 function initialize() {
@@ -1662,16 +1817,23 @@ function initialize() {
   bindTabs();
   document.querySelectorAll("input[type='range']").forEach(rangeFill);
   updateTransportUI();
-  scopeLoop();
+  updateMeterAnimation();
 
   document.addEventListener("visibilitychange", () => {
+    updateMeterAnimation();
     if (document.visibilityState === "visible" && state.playing) {
       if (engine.ctx?.state === "suspended") engine.ctx.resume().catch(() => {});
       requestWakeLock();
     }
   });
 
-  window.addEventListener("pagehide", releaseWakeLock);
+  window.addEventListener("pagehide", () => {
+    stopTransport();
+    if (meterAnimationFrame !== null) window.cancelAnimationFrame(meterAnimationFrame);
+    meterAnimationFrame = null;
+    if (engine.ctx?.state === "running") engine.ctx.suspend().catch(() => {});
+  });
+  window.addEventListener("pageshow", updateMeterAnimation);
 
   if ("serviceWorker" in navigator && location.protocol === "https:") {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
