@@ -21,6 +21,20 @@ const FX_SEND_DEFAULTS = {
   chorus: 0.30,
   flanger: 0.22,
 };
+const FX_PARAMETER_DEFAULTS = {
+  delayMode: "tape",
+  delayTime: 0.31,
+  delayFeedback: 0.38,
+  delayTone: 4200,
+  reverbMode: "room",
+  reverbDamping: 6500,
+  phaserRate: 0.32,
+  phaserDepth: 0.48,
+  chorusRate: 0.8,
+  chorusDepth: 0.52,
+  flangerRate: 0.18,
+  flangerFeedback: 0.32,
+};
 
 const BASS_GAIN_FLOOR = 0.0001;
 const BASS_FADE_TIME = 0.008;
@@ -113,18 +127,7 @@ const state = {
   fx: {
     enabled: createFxEnabledStates(),
     sends: createFxSendStates(),
-    delayMode: "tape",
-    delayTime: 0.31,
-    delayFeedback: 0.38,
-    delayTone: 4200,
-    reverbMode: "room",
-    reverbDamping: 6500,
-    phaserRate: 0.32,
-    phaserDepth: 0.48,
-    chorusRate: 0.8,
-    chorusDepth: 0.52,
-    flangerRate: 0.18,
-    flangerFeedback: 0.32,
+    channels: createFxParameterStates(),
   },
 };
 
@@ -158,6 +161,14 @@ function createFxEnabledStates() {
 
 function createFxSendStates() {
   return Object.fromEntries(CHANNELS.map(({ id }) => [id, { ...FX_SEND_DEFAULTS }]));
+}
+
+function createFxParameterStates() {
+  return Object.fromEntries(CHANNELS.map(({ id }) => [id, { ...FX_PARAMETER_DEFAULTS }]));
+}
+
+function getChannelFxState(channelId = state.selectedFxChannel) {
+  return state.fx.channels[channelId];
 }
 
 function clamp(value, min, max) {
@@ -201,6 +212,7 @@ class AudioEngine {
     this.noiseBuffer = null;
     this.analyser = null;
     this.effects = {};
+    this.channelDelays = new Map();
     this.driveCache = new Map();
     this.smoothParams = new WeakMap();
     this.bassVoices = new Set();
@@ -324,32 +336,7 @@ class AudioEngine {
 
   setupEffects() {
     const ctx = this.ctx;
-
-    const delayInput = ctx.createGain();
-    const delay = ctx.createDelay(2);
-    const delayTone = ctx.createBiquadFilter();
-    const delayFeedback = ctx.createGain();
-    const delayWet = ctx.createGain();
-    const delayLfo = ctx.createOscillator();
-    const delayLfoDepth = ctx.createGain();
-    delayTone.type = "lowpass";
-    // A resonant filter inside feedback can amplify each repeat even when the
-    // feedback knob is below 100%. Keep this loop strictly attenuating.
-    delayTone.Q.value = NON_RESONANT_Q_DB;
-    delay.delayTime.value = state.fx.delayTime;
-    delayFeedback.gain.value = clamp(state.fx.delayFeedback, 0, 0.82);
-    delayLfo.type = "sine";
-    delayLfo.frequency.value = 0.21;
-    delayInput.connect(delay);
-    delay.connect(delayTone);
-    delayTone.connect(delayWet);
-    delayWet.connect(this.masterGain);
-    delayTone.connect(delayFeedback);
-    delayFeedback.connect(delay);
-    delayLfo.connect(delayLfoDepth);
-    delayLfoDepth.connect(delay.delayTime);
-    delayLfo.start();
-    this.effects.delay = { input: delayInput, delay, tone: delayTone, feedback: delayFeedback, wet: delayWet, lfo: delayLfo, lfoDepth: delayLfoDepth };
+    const fx = getChannelFxState();
 
     const reverbInput = ctx.createGain();
     const reverbFilter = ctx.createBiquadFilter();
@@ -365,7 +352,7 @@ class AudioEngine {
       const input = ctx.createGain();
       const convolver = ctx.createConvolver();
       const output = ctx.createGain();
-      input.gain.value = output.gain.value = mode === state.fx.reverbMode ? 1 : 0;
+      input.gain.value = output.gain.value = mode === fx.reverbMode ? 1 : 0;
       convolver.buffer = this.createReverbImpulse(mode);
       reverbFilter.connect(input);
       input.connect(convolver);
@@ -423,7 +410,7 @@ class AudioEngine {
     const flangerLfo = ctx.createOscillator();
     const flangerDepth = ctx.createGain();
     flangerDelay.delayTime.value = 0.004;
-    flangerFeedback.gain.value = state.fx.flangerFeedback * 0.75;
+    flangerFeedback.gain.value = fx.flangerFeedback * 0.75;
     flangerInput.connect(flangerDelay);
     flangerDelay.connect(flangerWet);
     flangerWet.connect(this.masterGain);
@@ -440,6 +427,7 @@ class AudioEngine {
       const channel = this.channels[id];
       channel.fxSends = {};
       FX_NAMES.forEach((effect) => {
+        if (effect === "delay") return;
         const send = this.ctx.createGain();
         send.gain.value = 0;
         channel.panner.connect(send);
@@ -447,6 +435,95 @@ class AudioEngine {
         channel.fxSends[effect] = send;
       });
     });
+  }
+
+  createChannelDelay(channelId) {
+    if (!this.ctx || !this.channels[channelId]) return null;
+    const existing = this.channelDelays.get(channelId);
+    if (existing) {
+      if (existing.cleanupTimer !== null) window.clearTimeout(existing.cleanupTimer);
+      existing.cleanupTimer = null;
+      return existing;
+    }
+
+    const send = this.ctx.createGain();
+    const delay = this.ctx.createDelay(2);
+    const tone = this.ctx.createBiquadFilter();
+    const feedback = this.ctx.createGain();
+    const wet = this.ctx.createGain();
+    const lfo = this.ctx.createOscillator();
+    const lfoDepth = this.ctx.createGain();
+    send.gain.value = 0;
+    tone.type = "lowpass";
+    // A resonant filter inside feedback can amplify each repeat even when the
+    // feedback knob is below 100%. Keep this loop strictly attenuating.
+    tone.Q.value = NON_RESONANT_Q_DB;
+    lfo.type = "sine";
+    lfo.frequency.value = 0.21;
+    this.channels[channelId].panner.connect(send);
+    send.connect(delay);
+    delay.connect(tone);
+    tone.connect(wet);
+    wet.connect(this.masterGain);
+    tone.connect(feedback);
+    feedback.connect(delay);
+    lfo.connect(lfoDepth);
+    lfoDepth.connect(delay.delayTime);
+    lfo.start();
+
+    const unit = { channelId, send, delay, tone, feedback, wet, lfo, lfoDepth, cleanupTimer: null, lfoStopped: false };
+    this.channelDelays.set(channelId, unit);
+    this.channels[channelId].fxSends.delay = send;
+    this.updateDelay(channelId);
+    return unit;
+  }
+
+  updateDelay(channelId) {
+    const unit = this.channelDelays.get(channelId);
+    if (!unit) return;
+    const fx = getChannelFxState(channelId);
+    this.setSmooth(unit.delay.delayTime, clamp(fx.delayTime, 0.055, 0.9), 0.035);
+    this.setSmooth(unit.feedback.gain, state.fx.enabled[channelId].delay ? clamp(fx.delayFeedback, 0, 0.82) : 0);
+    this.setSmooth(unit.tone.frequency, fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone);
+    this.setSmooth(unit.lfoDepth.gain, fx.delayMode === "tape" ? 0.0018 : 0);
+    this.setSmooth(unit.wet.gain, 0.72);
+  }
+
+  scheduleDelayDisposal(channelId) {
+    const unit = this.channelDelays.get(channelId);
+    if (!unit || unit.cleanupTimer !== null) return;
+    const fx = getChannelFxState(channelId);
+    this.setSmooth(unit.send.gain, 0);
+    this.setSmooth(unit.feedback.gain, 0, 0.035);
+    const tailSeconds = clamp(fx.delayTime * 2 + 0.12, 0.24, 2);
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (!state.fx.enabled[channelId].delay) this.disposeChannelDelay(channelId);
+    }, tailSeconds * 1000);
+  }
+
+  disposeChannelDelay(channelId) {
+    const unit = this.channelDelays.get(channelId);
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.cleanupTimer = null;
+    const now = this.ctx?.currentTime || 0;
+    unit.send.gain.cancelScheduledValues(now);
+    unit.send.gain.setValueAtTime(0, now);
+    unit.feedback.gain.cancelScheduledValues(now);
+    unit.feedback.gain.setValueAtTime(0, now);
+    if (!unit.lfoStopped) {
+      unit.lfo.stop(now);
+      unit.lfoStopped = true;
+    }
+    this.channels[channelId].panner.disconnect(unit.send);
+    [unit.send, unit.delay, unit.tone, unit.feedback, unit.wet, unit.lfo, unit.lfoDepth].forEach((node) => node.disconnect());
+    if (this.channels[channelId]?.fxSends?.delay === unit.send) delete this.channels[channelId].fxSends.delay;
+    this.channelDelays.delete(channelId);
+  }
+
+  disposeAllChannelDelays() {
+    [...this.channelDelays.keys()].forEach((channelId) => this.disposeChannelDelay(channelId));
   }
 
   setSmooth(param, value, timeConstant = 0.018, linear = false) {
@@ -508,6 +585,17 @@ class AudioEngine {
   }
 
   updateEffectSend(channelId, effect) {
+    if (!this.ctx || !this.channels[channelId]) return;
+    if (effect === "delay") {
+      if (!state.fx.enabled[channelId].delay) {
+        this.scheduleDelayDisposal(channelId);
+        return;
+      }
+      const unit = this.createChannelDelay(channelId);
+      this.updateDelay(channelId);
+      this.setSmooth(unit.send.gain, state.fx.sends[channelId].delay);
+      return;
+    }
     const send = this.channels[channelId]?.fxSends?.[effect];
     if (!send) return;
     const enabled = state.fx.enabled[channelId][effect];
@@ -526,18 +614,16 @@ class AudioEngine {
     this.updateAllEffectSends();
   }
 
-  updateEffect(effect) {
+  updateEffect(effect, channelId = state.selectedFxChannel) {
     if (!this.ctx) return;
-    const fx = state.fx;
+    if (effect === "delay") {
+      this.updateDelay(channelId);
+      return;
+    }
+    const fx = getChannelFxState(channelId);
     const unit = this.effects[effect];
     if (!unit) return;
-    if (effect === "delay") {
-      this.setSmooth(unit.delay.delayTime, clamp(fx.delayTime, 0.055, 0.9), 0.035);
-      this.setSmooth(unit.feedback.gain, clamp(fx.delayFeedback, 0, 0.82));
-      this.setSmooth(unit.tone.frequency, fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone);
-      this.setSmooth(unit.lfoDepth.gain, fx.delayMode === "tape" ? 0.0018 : 0);
-      this.setSmooth(unit.wet.gain, 0.72);
-    } else if (effect === "reverb") {
+    if (effect === "reverb") {
       this.setSmooth(unit.filter.frequency, fx.reverbDamping);
       this.setSmooth(unit.wet.gain, 0.78);
     } else if (effect === "phaser") {
@@ -558,10 +644,11 @@ class AudioEngine {
     }
   }
 
-  rebuildReverb() {
+  rebuildReverb(channelId = state.selectedFxChannel) {
     if (!this.ctx || !this.effects.reverb) return;
+    const fx = getChannelFxState(channelId);
     Object.entries(this.effects.reverb.banks).forEach(([mode, bank]) => {
-      const active = mode === state.fx.reverbMode ? 1 : 0;
+      const active = mode === fx.reverbMode ? 1 : 0;
       // Finish at exactly zero so inactive convolution banks can become idle.
       this.setSmooth(bank.input.gain, active, 0.07, true);
       this.setSmooth(bank.output.gain, active, 0.07, true);
@@ -621,10 +708,11 @@ class AudioEngine {
     });
   }
 
-  stopVoices() {
+  stopVoices(disposeDelays = true) {
     this.drumPreviewRequests = {};
     this.stopBassVoices();
     if (this.ctx) this.fadeDrumVoices(this.ctx.currentTime);
+    if (disposeDelays) this.disposeAllChannelDelays();
   }
 
   makeDriveCurve(amount) {
@@ -912,6 +1000,7 @@ class AudioEngine {
     this.drumPreviewRequests[track] = request;
     await this.init();
     if (this.drumPreviewRequests[track] !== request || state.playing || state.starting) return;
+    this.updateEffectSend(track, "delay");
     const time = this.ctx.currentTime + 0.012;
     this.fadeDrumVoices(time, track);
     return this.scheduleDrum(track, time, level);
@@ -924,6 +1013,7 @@ class AudioEngine {
     const previewStep = { ...step, active: true };
     await this.init();
     if (request !== this.bassPreviewRequest || state.playing || state.starting) return;
+    this.updateEffectSend("bass", "delay");
     return this.scheduleBass(previewStep, this.ctx.currentTime + 0.012, 0.34, null);
   }
 }
@@ -1199,7 +1289,8 @@ async function startTransport() {
   try {
     await engine.init();
     if (request !== transportRequest) return;
-    engine.stopVoices();
+    engine.stopVoices(false);
+    engine.updateAllEffectSends();
     state.playing = true;
     stepToSchedule = 0;
     previousBassMidi = state.bassPattern[15].active ? state.bassPattern[15].midi : null;
@@ -1435,6 +1526,41 @@ function fxStateValue(name, raw) {
   return value;
 }
 
+function fxControlRawValue(name, value) {
+  if (name === "delayTime") return value * 1000;
+  if (["delayFeedback", "phaserDepth", "chorusDepth", "flangerFeedback"].includes(name)) return value * 100;
+  if (["phaserRate", "chorusRate", "flangerRate"].includes(name)) return value * 100;
+  return value;
+}
+
+const REVERB_TIME_LABELS = { room: "0.8 s", plate: "1.6 s", hall: "3.4 s" };
+
+function renderFxParameters() {
+  const fx = getChannelFxState();
+  document.querySelectorAll("[data-delay-mode]").forEach((button) => {
+    const active = button.dataset.delayMode === fx.delayMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-reverb-mode]").forEach((button) => {
+    const active = button.dataset.reverbMode === fx.reverbMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  const reverbDisplay = document.getElementById("reverbDisplay");
+  reverbDisplay.querySelector("span").textContent = fx.reverbMode.toUpperCase();
+  reverbDisplay.querySelector("strong").textContent = REVERB_TIME_LABELS[fx.reverbMode];
+
+  document.querySelectorAll("[data-fx-control]").forEach((control) => {
+    const input = control.querySelector("input");
+    const name = control.dataset.fxControl;
+    const raw = fxControlRawValue(name, fx[name]);
+    input.value = String(raw);
+    control.querySelector("output").textContent = fxOutput(name, raw);
+    rangeFill(input);
+  });
+}
+
 function updateEffectPowerUI(effect) {
   const channelId = state.selectedFxChannel;
   const channel = CHANNELS.find(({ id }) => id === channelId);
@@ -1477,6 +1603,7 @@ function renderFxChannel() {
     rangeFill(input);
   });
 
+  renderFxParameters();
   FX_NAMES.forEach(updateEffectPowerUI);
 }
 
@@ -1485,6 +1612,8 @@ function bindEffects() {
     button.addEventListener("click", () => {
       state.selectedFxChannel = button.dataset.fxChannel;
       renderFxChannel();
+      engine.updateAllEffects();
+      engine.rebuildReverb();
     });
   });
 
@@ -1500,28 +1629,16 @@ function bindEffects() {
 
   document.querySelectorAll("[data-delay-mode]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.fx.delayMode = button.dataset.delayMode;
-      document.querySelectorAll("[data-delay-mode]").forEach((candidate) => {
-        const active = candidate === button;
-        candidate.classList.toggle("is-active", active);
-        candidate.setAttribute("aria-checked", String(active));
-      });
+      getChannelFxState().delayMode = button.dataset.delayMode;
+      renderFxParameters();
       engine.updateEffect("delay");
     });
   });
 
-  const reverbTimes = { room: "0.8 s", plate: "1.6 s", hall: "3.4 s" };
   document.querySelectorAll("[data-reverb-mode]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.fx.reverbMode = button.dataset.reverbMode;
-      document.querySelectorAll("[data-reverb-mode]").forEach((candidate) => {
-        const active = candidate === button;
-        candidate.classList.toggle("is-active", active);
-        candidate.setAttribute("aria-checked", String(active));
-      });
-      const display = document.getElementById("reverbDisplay");
-      display.querySelector("span").textContent = state.fx.reverbMode.toUpperCase();
-      display.querySelector("strong").textContent = reverbTimes[state.fx.reverbMode];
+      getChannelFxState().reverbMode = button.dataset.reverbMode;
+      renderFxParameters();
       engine.rebuildReverb();
     });
   });
@@ -1533,7 +1650,7 @@ function bindEffects() {
     const effect = FX_NAMES.find((candidate) => name.startsWith(candidate));
     const update = () => {
       const raw = Number(input.value);
-      state.fx[name] = fxStateValue(name, raw);
+      getChannelFxState()[name] = fxStateValue(name, raw);
       output.textContent = fxOutput(name, raw);
       rangeFill(input);
       engine.updateEffect(effect);
@@ -1803,6 +1920,13 @@ function updateMeterAnimation() {
   if (metersVisible()) meterAnimationFrame = window.requestAnimationFrame(scopeLoop);
 }
 
+function handlePageHide() {
+  stopTransport();
+  if (meterAnimationFrame !== null) window.cancelAnimationFrame(meterAnimationFrame);
+  meterAnimationFrame = null;
+  if (engine.ctx?.state === "running") engine.ctx.suspend().catch(() => {});
+}
+
 function initialize() {
   renderPositionLeds();
   renderDrumSequencer();
@@ -1827,12 +1951,7 @@ function initialize() {
     }
   });
 
-  window.addEventListener("pagehide", () => {
-    stopTransport();
-    if (meterAnimationFrame !== null) window.cancelAnimationFrame(meterAnimationFrame);
-    meterAnimationFrame = null;
-    if (engine.ctx?.state === "running") engine.ctx.suspend().catch(() => {});
-  });
+  window.addEventListener("pagehide", handlePageHide);
   window.addEventListener("pageshow", updateMeterAnimation);
 
   if ("serviceWorker" in navigator && location.protocol === "https:") {

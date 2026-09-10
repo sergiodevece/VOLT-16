@@ -183,9 +183,10 @@ test("rapid continuous controls stay continuous, bound automation, and ignore id
 test("reverb switches reuse prepared buffers and nodes, without replacing a live impulse", async () => {
   const { state, engine, ctx } = setup(); await engine.init();
   const nodes = ctx.created; const buffers = ctx.buffers;
+  const fx = state.fx.channels[state.selectedFxChannel];
   for (let index = 0; index < 1200; index += 1) {
     ctx.currentTime += 0.01;
-    state.fx.reverbMode = ["room", "plate", "hall"][index % 3];
+    fx.reverbMode = ["room", "plate", "hall"][index % 3];
     const banks = engine.effects.reverb.banks;
     const before = banks && Object.values(banks).map((bank) => bank.output.gain.valueAt(ctx.currentTime));
     engine.rebuildReverb();
@@ -197,7 +198,7 @@ test("reverb switches reuse prepared buffers and nodes, without replacing a live
   assert.equal(ctx.created, nodes);
   assert.equal(ctx.buffers, buffers, "no impulse generation while turning the reverb selector");
   for (const [mode, bank] of Object.entries(engine.effects.reverb.banks)) {
-    const target = mode === state.fx.reverbMode ? 1 : 0;
+    const target = mode === fx.reverbMode ? 1 : 0;
     assert.equal(bank.input.gain.valueAt(ctx.currentTime + 1), target, "inactive bank must receive exact silence");
     assert.equal(bank.output.gain.valueAt(ctx.currentTime + 1), target);
   }
@@ -218,8 +219,11 @@ function lowpassMagnitude(cutoff, qDb, sampleRate, frequency) {
 
 test("delay feedback stays below unity across its tone range at the maximum UI feedback", async () => {
   const { state, engine } = setup(); await engine.init();
-  state.fx.delayFeedback = 0.82; engine.updateAllEffects();
-  const q = engine.effects.delay.tone.Q.value;
+  const channelId = state.selectedFxChannel;
+  state.fx.channels[channelId].delayFeedback = 0.82;
+  state.fx.enabled[channelId].delay = true;
+  engine.updateEffectSend(channelId, "delay");
+  const q = engine.channelDelays.get(channelId).tone.Q.value;
   for (const sampleRate of [44100, 48000, 96000]) {
     for (const cutoff of [900, 4200, 6200, 12000]) {
       for (let bin = 0; bin < 4096; bin += 1) {
@@ -231,9 +235,12 @@ test("delay feedback stays below unity across its tone range at the maximum UI f
 });
 
 test("a numerical impulse through the delay feedback decays instead of growing over 20 seconds", async () => {
-  const { engine } = setup(); await engine.init();
+  const { state, engine } = setup(); await engine.init();
+  const channelId = state.selectedFxChannel;
+  state.fx.enabled[channelId].delay = true;
+  engine.updateEffectSend(channelId, "delay");
   const sampleRate = 48000; const w0 = 2 * Math.PI * 900 / sampleRate;
-  const alpha = Math.sin(w0) / (2 * 10 ** (engine.effects.delay.tone.Q.value / 20));
+  const alpha = Math.sin(w0) / (2 * 10 ** (engine.channelDelays.get(channelId).tone.Q.value / 20));
   const a0 = 1 + alpha;
   const b0 = (1 - Math.cos(w0)) / 2 / a0; const b1 = 2 * b0; const b2 = b0;
   const a1 = -2 * Math.cos(w0) / a0; const a2 = (1 - alpha) / a0;
