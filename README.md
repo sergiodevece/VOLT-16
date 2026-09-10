@@ -20,7 +20,7 @@ Durante la reproducción, editar batería o bajo modifica el patrón sin dispara
 - Tempo, tap tempo y swing.
 - Por canal: compresor de inspiración óptica con gain y peak reduction; EQ con pasa altos, pasa bajos y dos shelving.
 - Delay de cinta/digital, reverb room/plate/hall, phaser, chorus y flanger.
-- Envíos independientes por canal. Los ajustes del procesador de cada efecto son compartidos entre los canales que lo utilizan.
+- Envíos, activación y parámetros de cada efecto independientes para los seis canales.
 
 El sonido sale por la salida de audio que tenga seleccionada el dispositivo. Los patrones y ajustes se reinician al recargar la página.
 
@@ -55,14 +55,16 @@ node --check dist/sw.js
 node --test tests/*.test.cjs
 ```
 
-Las pruebas comprueban la continuidad de la envolvente, la gestión de notas durante la edición, la recuperación del secuenciador y el aislamiento de la caché. También simulan diez minutos a 190 BPM con todos los instrumentos, miles de cambios de controles y 1.200 cambios de reverb. Verifican la desconexión de voces terminadas, STOP durante el arranque y la estabilidad del feedback del delay mediante las ecuaciones del filtro. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
+Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM y un escenario con los cinco efectos activos en los seis canales, cambios repetidos, desactivación/reactivación y PLAY/STOP. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Revisión de audio r7
+## Arquitectura de audio r8
 
-- Cada voz de batería desconecta todos sus nodos al terminar; STOP retira también los golpes ya programados, con un fundido breve.
-- Los controles sustituyen su automatización anterior conservando el valor alcanzado y omiten ajustes repetidos. Cada control de FX actualiza su propio efecto.
-- Room, plate y hall se preparan antes de iniciar el patrón. Su selección cruza ganancias sin generar buffers ni sustituir una convolución en directo. Las rutas inactivas reciben silencio.
+- Cada canal conserva su propio estado, envío y ruta FX. Cambiar los parámetros de un canal no modifica los nodos de los demás.
+- Delay, chorus, phaser y flanger se crean bajo demanda y se desconectan después de sus colas. Sus LFO se detienen durante el cleanup.
+- La reverb prepara una sola vez tres impulsos y tres convolvers compartidos. Cada canal activo aporta su propio send, damping y ganancias de selección room/plate/hall.
+- Con los efectos apagados no existen procesadores ni envíos permanentes por canal. STOP retira rutas, timers y LFO, y cada voz terminada desconecta sus nodos.
+- Los controles sustituyen su automatización anterior conservando el valor alcanzado y omiten objetivos repetidos.
 - El filtro del delay usa una Q sin resonancia para que el feedback máximo permitido no amplifique sucesivamente algunas frecuencias. En los filtros lowpass/highpass de Web Audio, Q se expresa en dB: [especificación de los filtros](https://www.w3.org/TR/webaudio/#filters-characteristics).
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
-Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r7**. Prueba 10–15 minutos editando patrones, alternando efectos y cambiando reverb; comprueba también PLAY/STOP repetidos. Si hay crujidos, anota dispositivo, navegador, efecto y ajuste que los provoca, y si desaparecen al recargar.
+Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r8**. Prueba 10–15 minutos editando patrones, usando parámetros FX distintos en varios canales y haciendo PLAY/STOP repetidos. Si hay crujidos, anota dispositivo, navegador, efecto y ajuste que los provoca, y si desaparecen al recargar.
