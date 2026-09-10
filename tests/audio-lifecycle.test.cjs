@@ -57,7 +57,14 @@ function mockContext(sampleRate = 48000) {
       delayTime: new Param(0), pan: new Param(0), threshold: new Param(), knee: new Param(),
       ratio: new Param(), attack: new Param(), release: new Param(),
       connect(target) { this.connections.push(target); },
-      disconnect() { this.connections = []; ctx.nodes.delete(this); },
+      disconnect(target) {
+        if (target) {
+          this.connections = this.connections.filter((connection) => connection !== target);
+          return;
+        }
+        this.connections = [];
+        ctx.nodes.delete(this);
+      },
       start(t = 0) { this.startAt = t; ctx.sources.add(this); },
       stop(t = 0) { this.stopAt = t; },
       getByteTimeDomainData(data) { data.fill(128); },
@@ -131,10 +138,122 @@ test("ten simulated minutes at 190 BPM release all completed percussion and bass
   }
   ctx.finishUntil(605);
   assert.equal(ctx.nodes.size, permanentNodes, "every ended voice must disconnect all its nodes");
-  assert.equal(ctx.sources.size, permanentSources, "only the four shared FX LFOs may remain");
+  assert.equal(ctx.sources.size, permanentSources, "no completed voice source may remain");
   assert.equal(engine.bassVoices.size, 0);
   assert.equal(engine.drumVoices.size, 0);
   console.log(`stress: ${ctx.created} nodes created; max ${maximum} transient nodes; ${ctx.nodes.size} permanent nodes after cleanup`);
+});
+
+test("maximum six-channel FX load survives parameter churn, reuse, PLAY/STOP, and final cleanup", async () => {
+  const api = setup();
+  await api.engine.init();
+  const { state, engine, ctx, callbacks } = api;
+  const channelIds = ["kick", "snare", "clap", "closedHat", "openHat", "bass"];
+  const effectNames = ["delay", "chorus", "phaser", "flanger", "reverb"];
+  const registries = [
+    engine.channelDelays,
+    engine.channelChoruses,
+    engine.channelPhasers,
+    engine.channelFlangers,
+    engine.channelReverbs,
+  ];
+  const baseline = ctx.nodes.size;
+  state.bpm = 190;
+
+  channelIds.forEach((channelId, channelIndex) => {
+    Object.assign(state.fx.channels[channelId], {
+      delayMode: channelIndex % 2 ? "digital" : "tape",
+      delayTime: 0.08 + channelIndex * 0.09,
+      delayFeedback: 0.22 + channelIndex * 0.09,
+      delayTone: 2800 + channelIndex * 1500,
+      chorusRate: 0.35 + channelIndex * 0.21,
+      chorusDepth: 0.18 + channelIndex * 0.12,
+      phaserRate: 0.16 + channelIndex * 0.14,
+      phaserDepth: 0.24 + channelIndex * 0.11,
+      flangerRate: 0.12 + channelIndex * 0.10,
+      flangerFeedback: 0.20 + channelIndex * 0.10,
+      reverbMode: ["room", "plate", "hall"][channelIndex % 3],
+      reverbDamping: 1800 + channelIndex * 2200,
+    });
+    effectNames.forEach((effect, effectIndex) => {
+      state.fx.enabled[channelId][effect] = true;
+      state.fx.sends[channelId][effect] = 0.12 + (channelIndex + effectIndex) * 0.035;
+    });
+  });
+  engine.updateAllEffectSends();
+
+  registries.forEach((registry) => assert.equal(registry.size, channelIds.length));
+  const fullFxGraph = ctx.nodes.size;
+  const initialRoutes = registries.map((registry) => channelIds.map((channelId) => registry.get(channelId)));
+  const beforeParameterChurn = ctx.created;
+
+  for (let iteration = 0; iteration < 600; iteration += 1) {
+    channelIds.forEach((channelId, channelIndex) => {
+      const fx = state.fx.channels[channelId];
+      fx.delayTime = 0.055 + ((iteration + channelIndex * 11) % 80) / 100;
+      fx.delayFeedback = ((iteration + channelIndex * 7) % 83) / 100;
+      fx.delayTone = 1800 + ((iteration + channelIndex * 13) % 100) * 110;
+      fx.chorusRate = 0.1 + ((iteration + channelIndex * 17) % 190) / 100;
+      fx.chorusDepth = ((iteration + channelIndex * 19) % 101) / 100;
+      fx.phaserRate = 0.08 + ((iteration + channelIndex * 23) % 140) / 100;
+      fx.phaserDepth = ((iteration + channelIndex * 29) % 101) / 100;
+      fx.flangerRate = 0.05 + ((iteration + channelIndex * 31) % 95) / 100;
+      fx.flangerFeedback = ((iteration + channelIndex * 37) % 76) / 100;
+      fx.reverbMode = ["room", "plate", "hall"][(iteration + channelIndex) % 3];
+      fx.reverbDamping = 1000 + ((iteration + channelIndex * 41) % 130) * 100;
+      effectNames.forEach((effect) => engine.updateEffect(effect, channelId));
+    });
+  }
+  assert.equal(ctx.created, beforeParameterChurn, "parameter automation must not allocate audio nodes");
+
+  const interval = 60 / state.bpm / 4;
+  let maximumTransient = 0;
+  for (let step = 0; step < 256; step += 1) {
+    const now = step * interval;
+    ctx.finishUntil(now);
+    for (const track of channelIds.slice(0, -1)) engine.scheduleDrum(track, now + 0.01, 2);
+    engine.scheduleBass({ active: true, midi: 24 + step % 12, slide: step % 4 === 0 }, now + 0.01, interval, 24);
+    maximumTransient = Math.max(maximumTransient, ctx.nodes.size - fullFxGraph);
+  }
+  ctx.finishUntil(256 * interval + 5);
+  assert.equal(ctx.nodes.size, fullFxGraph);
+  assert.equal(engine.drumVoices.size, 0);
+  assert.equal(engine.bassVoices.size, 0);
+
+  channelIds.forEach((channelId) => effectNames.forEach((effect) => {
+    state.fx.enabled[channelId][effect] = false;
+  }));
+  engine.updateAllEffectSends();
+  assert.ok(callbacks.size > 0, "disabled routes wait for their bounded cleanup");
+  channelIds.forEach((channelId) => effectNames.forEach((effect) => {
+    state.fx.enabled[channelId][effect] = true;
+  }));
+  engine.updateAllEffectSends();
+  assert.equal(callbacks.size, 0, "reactivation cancels every pending cleanup");
+  registries.forEach((registry, registryIndex) => channelIds.forEach((channelId, channelIndex) => {
+    assert.equal(registry.get(channelId), initialRoutes[registryIndex][channelIndex], "reactivation must reuse the existing route");
+  }));
+  assert.equal(ctx.nodes.size, fullFxGraph);
+
+  await api.startTransport();
+  assert.equal(state.playing, true);
+  maximumTransient = Math.max(maximumTransient, ctx.nodes.size - fullFxGraph);
+  api.stopTransport();
+  ctx.finishUntil(ctx.currentTime + 5);
+  registries.forEach((registry) => assert.equal(registry.size, 0));
+  assert.equal(callbacks.size, 0);
+  assert.equal(ctx.nodes.size, baseline);
+
+  await api.startTransport();
+  registries.forEach((registry) => assert.equal(registry.size, channelIds.length));
+  api.stopTransport();
+  ctx.finishUntil(ctx.currentTime + 5);
+  registries.forEach((registry) => assert.equal(registry.size, 0));
+  assert.equal(callbacks.size, 0);
+  assert.equal(ctx.nodes.size, baseline);
+  assert.equal([...ctx.nodes].filter((node) => node.kind === "convolver").length, 3);
+  assert.equal(ctx.buffers, 4, "one noise buffer and exactly three reverb impulses survive the session");
+  console.log(`max FX stress: ${fullFxGraph} sustained nodes; max ${maximumTransient} transient nodes; ${baseline} baseline nodes after cleanup`);
 });
 
 test("drum previews cannot add off-grid hits during playback, startup, or a delayed resume", async () => {
@@ -192,7 +311,7 @@ test("reverb switches reuse prepared buffers and nodes, without replacing a live
     ctx.currentTime += 0.01;
     fx.reverbMode = ["room", "plate", "hall"][index % 3];
     const before = Object.values(route.presetGains).map((gain) => gain.gain.valueAt(ctx.currentTime));
-    engine.rebuildReverb();
+    engine.updateEffect("reverb", channelId);
     assert.equal(ctx.buffers, buffers, "no impulse generation while turning the reverb selector");
     Object.values(route.presetGains).forEach((gain, i) => {
       assert.ok(Math.abs(gain.gain.valueAt(ctx.currentTime) - before[i]) < 1e-9);

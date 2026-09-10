@@ -206,7 +206,7 @@ function prepareModeButton(dataName, value) {
   return button;
 }
 
-test("only reverb remains global while delay and modulation effects are lazy", async () => {
+test("only the shared reverb resources remain global while every channel route is lazy", async () => {
   const { engine } = setup();
   await engine.init();
 
@@ -224,13 +224,17 @@ test("only reverb remains global while delay and modulation effects are lazy", a
   assert.equal(Object.values(engine.effects.reverb.banks).filter((bank) => bank.convolver.kind === "convolver").length, 3);
 });
 
-test("no per-channel FX send is created eagerly", async () => {
-  const { engine, CHANNELS } = setup();
+test("the consolidated engine has no legacy send registry or compatibility helpers", async () => {
+  const { state, engine, CHANNELS } = setup();
   await engine.init();
 
   CHANNELS.forEach(({ id }) => {
-    assert.deepEqual(Object.keys(engine.channels[id].fxSends), []);
+    assert.equal("fxSends" in engine.channels[id], false);
   });
+  assert.equal(engine.setupEffectSends, undefined);
+  assert.equal(engine.updateAllEffects, undefined);
+  assert.equal(engine.rebuildReverb, undefined);
+  assert.deepEqual(Object.keys(state.fx), ["enabled", "sends", "channels"]);
 });
 
 test("send, enablement, and parameter state are independent per channel", async () => {
@@ -243,8 +247,8 @@ test("send, enablement, and parameter state are independent per channel", async 
 
   assert.equal(state.fx.enabled.bass.delay, false);
   assert.equal(state.fx.sends.bass.delay, 0.24);
-  assert.equal(engine.channels.snare.fxSends.delay.gain.value, 0.61);
-  assert.equal(engine.channels.bass.fxSends.delay, undefined);
+  assert.equal(engine.channelDelays.get("snare").send.gain.value, 0.61);
+  assert.equal(engine.channelDelays.has("bass"), false);
 
   const parameterStates = CHANNELS.map(({ id }) => state.fx.channels[id]);
   assert.equal(new Set(parameterStates).size, CHANNELS.length, "every channel owns a distinct parameter object");
@@ -477,7 +481,6 @@ test("STOP and pagehide synchronously dispose delay instances, timers, LFOs, and
   assert.equal(api.callbacks.size, 0);
   assert.ok(units.every((unit) => unit.lfo.stopped && unit.lfo.disconnected));
   assert.ok(units.every((unit) => !api.engine.channels[unit.channelId].panner.connections.includes(unit.send)));
-  assert.ok(units.every((unit) => api.engine.channels[unit.channelId].fxSends.delay === undefined));
 
   units = enableTwoDelays();
   api.handlePageHide();
@@ -832,7 +835,7 @@ test("reverb crossfades stay bounded and repeated preset changes allocate nothin
     ctx.currentTime += 0.003;
     state.fx.channels[channelId].reverbMode = ["room", "plate", "hall"][index % 3];
     state.fx.channels[channelId].reverbDamping = 1500 + (index % 100) * 120;
-    engine.rebuildReverb(channelId);
+    engine.updateEffect("reverb", channelId);
     assert.ok(route.damping.frequency.events.length <= 2);
     Object.values(route.presetGains).forEach((gain) => assert.ok(gain.gain.events.length <= 2));
   }

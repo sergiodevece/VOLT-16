@@ -316,11 +316,10 @@ class AudioEngine {
 
     this.noiseBuffer = this.createNoiseBuffer(2);
     this.setupEffects();
-    this.setupEffectSends();
     this.updateAllChannels();
     this.updateAllProcessors();
     this.updateMaster();
-    this.updateAllEffects();
+    this.updateAllEffectSends();
 
     if (this.ctx.state === "suspended") await this.ctx.resume();
   }
@@ -354,12 +353,6 @@ class AudioEngine {
     });
     this.effects.reverb = { banks, wet: reverbWet };
 
-  }
-
-  setupEffectSends() {
-    CHANNELS.forEach(({ id }) => {
-      this.channels[id].fxSends = {};
-    });
   }
 
   createChannelDelay(channelId) {
@@ -398,7 +391,6 @@ class AudioEngine {
 
     const unit = { channelId, send, delay, tone, feedback, wet, lfo, lfoDepth, cleanupTimer: null, lfoStopped: false };
     this.channelDelays.set(channelId, unit);
-    this.channels[channelId].fxSends.delay = send;
     this.updateDelay(channelId);
     return unit;
   }
@@ -443,7 +435,6 @@ class AudioEngine {
     }
     this.channels[channelId].panner.disconnect(unit.send);
     [unit.send, unit.delay, unit.tone, unit.feedback, unit.wet, unit.lfo, unit.lfoDepth].forEach((node) => node.disconnect());
-    if (this.channels[channelId]?.fxSends?.delay === unit.send) delete this.channels[channelId].fxSends.delay;
     this.channelDelays.delete(channelId);
   }
 
@@ -478,7 +469,6 @@ class AudioEngine {
 
     const unit = { channelId, send, delay, wet, lfo, depth, cleanupTimer: null, lfoStopped: false };
     this.channelChoruses.set(channelId, unit);
-    this.channels[channelId].fxSends.chorus = send;
     this.updateChorus(channelId);
     return unit;
   }
@@ -516,7 +506,6 @@ class AudioEngine {
     }
     this.channels[channelId].panner.disconnect(unit.send);
     [unit.send, unit.delay, unit.wet, unit.lfo, unit.depth].forEach((node) => node.disconnect());
-    if (this.channels[channelId]?.fxSends?.chorus === unit.send) delete this.channels[channelId].fxSends.chorus;
     this.channelChoruses.delete(channelId);
   }
 
@@ -561,7 +550,6 @@ class AudioEngine {
 
     const unit = { channelId, send, filters, wet, lfo, depths, cleanupTimer: null, lfoStopped: false };
     this.channelPhasers.set(channelId, unit);
-    this.channels[channelId].fxSends.phaser = send;
     this.updatePhaser(channelId);
     return unit;
   }
@@ -601,7 +589,6 @@ class AudioEngine {
     }
     this.channels[channelId].panner.disconnect(unit.send);
     [unit.send, ...unit.filters, unit.wet, unit.lfo, ...unit.depths].forEach((node) => node.disconnect());
-    if (this.channels[channelId]?.fxSends?.phaser === unit.send) delete this.channels[channelId].fxSends.phaser;
     this.channelPhasers.delete(channelId);
   }
 
@@ -639,7 +626,6 @@ class AudioEngine {
 
     const unit = { channelId, send, delay, feedback, wet, lfo, depth, cleanupTimer: null, lfoStopped: false };
     this.channelFlangers.set(channelId, unit);
-    this.channels[channelId].fxSends.flanger = send;
     this.updateFlanger(channelId);
     return unit;
   }
@@ -681,7 +667,6 @@ class AudioEngine {
     }
     this.channels[channelId].panner.disconnect(unit.send);
     [unit.send, unit.delay, unit.feedback, unit.wet, unit.lfo, unit.depth].forEach((node) => node.disconnect());
-    if (this.channels[channelId]?.fxSends?.flanger === unit.send) delete this.channels[channelId].fxSends.flanger;
     this.channelFlangers.delete(channelId);
   }
 
@@ -713,7 +698,6 @@ class AudioEngine {
 
     const unit = { channelId, send, damping, presetGains, cleanupTimer: null };
     this.channelReverbs.set(channelId, unit);
-    this.channels[channelId].fxSends.reverb = send;
     this.updateReverb(channelId);
     return unit;
   }
@@ -756,7 +740,6 @@ class AudioEngine {
     });
     this.channels[channelId].panner.disconnect(unit.send);
     [unit.send, unit.damping, ...Object.values(unit.presetGains)].forEach((node) => node.disconnect());
-    if (this.channels[channelId]?.fxSends?.reverb === unit.send) delete this.channels[channelId].fxSends.reverb;
     this.channelReverbs.delete(channelId);
   }
 
@@ -881,11 +864,6 @@ class AudioEngine {
     });
   }
 
-  updateAllEffects() {
-    FX_NAMES.forEach((effect) => this.updateEffect(effect));
-    this.updateAllEffectSends();
-  }
-
   updateEffect(effect, channelId = state.selectedFxChannel) {
     if (!this.ctx) return;
     if (effect === "delay") {
@@ -907,10 +885,6 @@ class AudioEngine {
     if (effect === "reverb") {
       this.updateReverb(channelId);
     }
-  }
-
-  rebuildReverb(channelId = state.selectedFxChannel) {
-    this.updateReverb(channelId);
   }
 
   createReverbImpulse(mode) {
@@ -1884,8 +1858,6 @@ function bindEffects() {
     button.addEventListener("click", () => {
       state.selectedFxChannel = button.dataset.fxChannel;
       renderFxChannel();
-      engine.updateAllEffects();
-      engine.rebuildReverb();
     });
   });
 
@@ -1911,7 +1883,7 @@ function bindEffects() {
     button.addEventListener("click", () => {
       getChannelFxState().reverbMode = button.dataset.reverbMode;
       renderFxParameters();
-      engine.rebuildReverb();
+      engine.updateEffect("reverb");
     });
   });
 
