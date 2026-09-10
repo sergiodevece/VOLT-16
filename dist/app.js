@@ -213,6 +213,9 @@ class AudioEngine {
     this.analyser = null;
     this.effects = {};
     this.channelDelays = new Map();
+    this.channelChoruses = new Map();
+    this.channelPhasers = new Map();
+    this.channelFlangers = new Map();
     this.driveCache = new Map();
     this.smoothParams = new WeakMap();
     this.bassVoices = new Set();
@@ -362,64 +365,6 @@ class AudioEngine {
     });
     this.effects.reverb = { input: reverbInput, filter: reverbFilter, banks, wet: reverbWet };
 
-    const phaserInput = ctx.createGain();
-    const phaserFilters = [280, 620, 1280, 2500].map((frequency) => {
-      const filter = ctx.createBiquadFilter();
-      filter.type = "allpass";
-      filter.frequency.value = frequency;
-      filter.Q.value = 0.78;
-      return filter;
-    });
-    const phaserWet = ctx.createGain();
-    const phaserLfo = ctx.createOscillator();
-    const phaserDepths = phaserFilters.map((filter, index) => {
-      const depth = ctx.createGain();
-      phaserLfo.connect(depth);
-      depth.connect(filter.frequency);
-      depth.gain.value = [220, 420, 720, 1100][index];
-      return depth;
-    });
-    phaserInput.connect(phaserFilters[0]);
-    phaserFilters.forEach((filter, index) => {
-      if (phaserFilters[index + 1]) filter.connect(phaserFilters[index + 1]);
-    });
-    phaserFilters.at(-1).connect(phaserWet);
-    phaserWet.connect(this.masterGain);
-    phaserLfo.start();
-    this.effects.phaser = { input: phaserInput, filters: phaserFilters, wet: phaserWet, lfo: phaserLfo, depths: phaserDepths };
-
-    const chorusInput = ctx.createGain();
-    const chorusDelay = ctx.createDelay(0.08);
-    const chorusWet = ctx.createGain();
-    const chorusLfo = ctx.createOscillator();
-    const chorusDepth = ctx.createGain();
-    chorusDelay.delayTime.value = 0.018;
-    chorusLfo.type = "sine";
-    chorusInput.connect(chorusDelay);
-    chorusDelay.connect(chorusWet);
-    chorusWet.connect(this.masterGain);
-    chorusLfo.connect(chorusDepth);
-    chorusDepth.connect(chorusDelay.delayTime);
-    chorusLfo.start();
-    this.effects.chorus = { input: chorusInput, delay: chorusDelay, wet: chorusWet, lfo: chorusLfo, depth: chorusDepth };
-
-    const flangerInput = ctx.createGain();
-    const flangerDelay = ctx.createDelay(0.03);
-    const flangerFeedback = ctx.createGain();
-    const flangerWet = ctx.createGain();
-    const flangerLfo = ctx.createOscillator();
-    const flangerDepth = ctx.createGain();
-    flangerDelay.delayTime.value = 0.004;
-    flangerFeedback.gain.value = fx.flangerFeedback * 0.75;
-    flangerInput.connect(flangerDelay);
-    flangerDelay.connect(flangerWet);
-    flangerWet.connect(this.masterGain);
-    flangerDelay.connect(flangerFeedback);
-    flangerFeedback.connect(flangerDelay);
-    flangerLfo.connect(flangerDepth);
-    flangerDepth.connect(flangerDelay.delayTime);
-    flangerLfo.start();
-    this.effects.flanger = { input: flangerInput, delay: flangerDelay, feedback: flangerFeedback, wet: flangerWet, lfo: flangerLfo, depth: flangerDepth };
   }
 
   setupEffectSends() {
@@ -427,7 +372,7 @@ class AudioEngine {
       const channel = this.channels[id];
       channel.fxSends = {};
       FX_NAMES.forEach((effect) => {
-        if (effect === "delay") return;
+        if (["delay", "chorus", "phaser", "flanger"].includes(effect)) return;
         const send = this.ctx.createGain();
         send.gain.value = 0;
         channel.panner.connect(send);
@@ -526,6 +471,244 @@ class AudioEngine {
     [...this.channelDelays.keys()].forEach((channelId) => this.disposeChannelDelay(channelId));
   }
 
+  createChannelChorus(channelId) {
+    if (!this.ctx || !this.channels[channelId]) return null;
+    const existing = this.channelChoruses.get(channelId);
+    if (existing) {
+      if (existing.cleanupTimer !== null) window.clearTimeout(existing.cleanupTimer);
+      existing.cleanupTimer = null;
+      return existing;
+    }
+
+    const send = this.ctx.createGain();
+    const delay = this.ctx.createDelay(0.08);
+    const wet = this.ctx.createGain();
+    const lfo = this.ctx.createOscillator();
+    const depth = this.ctx.createGain();
+    send.gain.value = 0;
+    delay.delayTime.value = 0.018;
+    lfo.type = "sine";
+    this.channels[channelId].panner.connect(send);
+    send.connect(delay);
+    delay.connect(wet);
+    wet.connect(this.masterGain);
+    lfo.connect(depth);
+    depth.connect(delay.delayTime);
+    lfo.start();
+
+    const unit = { channelId, send, delay, wet, lfo, depth, cleanupTimer: null, lfoStopped: false };
+    this.channelChoruses.set(channelId, unit);
+    this.channels[channelId].fxSends.chorus = send;
+    this.updateChorus(channelId);
+    return unit;
+  }
+
+  updateChorus(channelId) {
+    const unit = this.channelChoruses.get(channelId);
+    if (!unit) return;
+    const fx = getChannelFxState(channelId);
+    this.setSmooth(unit.lfo.frequency, fx.chorusRate);
+    this.setSmooth(unit.depth.gain, 0.001 + fx.chorusDepth * 0.0065);
+    this.setSmooth(unit.wet.gain, 0.62);
+  }
+
+  scheduleChorusDisposal(channelId) {
+    const unit = this.channelChoruses.get(channelId);
+    if (!unit || unit.cleanupTimer !== null) return;
+    this.setSmooth(unit.send.gain, 0);
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (!state.fx.enabled[channelId].chorus) this.disposeChannelChorus(channelId);
+    }, 120);
+  }
+
+  disposeChannelChorus(channelId) {
+    const unit = this.channelChoruses.get(channelId);
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.cleanupTimer = null;
+    const now = this.ctx?.currentTime || 0;
+    unit.send.gain.cancelScheduledValues(now);
+    unit.send.gain.setValueAtTime(0, now);
+    if (!unit.lfoStopped) {
+      unit.lfo.stop(now);
+      unit.lfoStopped = true;
+    }
+    this.channels[channelId].panner.disconnect(unit.send);
+    [unit.send, unit.delay, unit.wet, unit.lfo, unit.depth].forEach((node) => node.disconnect());
+    if (this.channels[channelId]?.fxSends?.chorus === unit.send) delete this.channels[channelId].fxSends.chorus;
+    this.channelChoruses.delete(channelId);
+  }
+
+  disposeAllChannelChoruses() {
+    [...this.channelChoruses.keys()].forEach((channelId) => this.disposeChannelChorus(channelId));
+  }
+
+  createChannelPhaser(channelId) {
+    if (!this.ctx || !this.channels[channelId]) return null;
+    const existing = this.channelPhasers.get(channelId);
+    if (existing) {
+      if (existing.cleanupTimer !== null) window.clearTimeout(existing.cleanupTimer);
+      existing.cleanupTimer = null;
+      return existing;
+    }
+
+    const send = this.ctx.createGain();
+    const filters = [280, 620, 1280, 2500].map((frequency) => {
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = "allpass";
+      filter.frequency.value = frequency;
+      filter.Q.value = 0.78;
+      return filter;
+    });
+    const wet = this.ctx.createGain();
+    const lfo = this.ctx.createOscillator();
+    const depths = filters.map((filter) => {
+      const depth = this.ctx.createGain();
+      lfo.connect(depth);
+      depth.connect(filter.frequency);
+      return depth;
+    });
+    send.gain.value = 0;
+    this.channels[channelId].panner.connect(send);
+    send.connect(filters[0]);
+    filters.forEach((filter, index) => {
+      if (filters[index + 1]) filter.connect(filters[index + 1]);
+    });
+    filters.at(-1).connect(wet);
+    wet.connect(this.masterGain);
+    lfo.start();
+
+    const unit = { channelId, send, filters, wet, lfo, depths, cleanupTimer: null, lfoStopped: false };
+    this.channelPhasers.set(channelId, unit);
+    this.channels[channelId].fxSends.phaser = send;
+    this.updatePhaser(channelId);
+    return unit;
+  }
+
+  updatePhaser(channelId) {
+    const unit = this.channelPhasers.get(channelId);
+    if (!unit) return;
+    const fx = getChannelFxState(channelId);
+    this.setSmooth(unit.lfo.frequency, fx.phaserRate);
+    unit.depths.forEach((depth, index) => {
+      this.setSmooth(depth.gain, [260, 470, 780, 1150][index] * fx.phaserDepth);
+    });
+    this.setSmooth(unit.wet.gain, 0.62);
+  }
+
+  schedulePhaserDisposal(channelId) {
+    const unit = this.channelPhasers.get(channelId);
+    if (!unit || unit.cleanupTimer !== null) return;
+    this.setSmooth(unit.send.gain, 0);
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (!state.fx.enabled[channelId].phaser) this.disposeChannelPhaser(channelId);
+    }, 100);
+  }
+
+  disposeChannelPhaser(channelId) {
+    const unit = this.channelPhasers.get(channelId);
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.cleanupTimer = null;
+    const now = this.ctx?.currentTime || 0;
+    unit.send.gain.cancelScheduledValues(now);
+    unit.send.gain.setValueAtTime(0, now);
+    if (!unit.lfoStopped) {
+      unit.lfo.stop(now);
+      unit.lfoStopped = true;
+    }
+    this.channels[channelId].panner.disconnect(unit.send);
+    [unit.send, ...unit.filters, unit.wet, unit.lfo, ...unit.depths].forEach((node) => node.disconnect());
+    if (this.channels[channelId]?.fxSends?.phaser === unit.send) delete this.channels[channelId].fxSends.phaser;
+    this.channelPhasers.delete(channelId);
+  }
+
+  disposeAllChannelPhasers() {
+    [...this.channelPhasers.keys()].forEach((channelId) => this.disposeChannelPhaser(channelId));
+  }
+
+  createChannelFlanger(channelId) {
+    if (!this.ctx || !this.channels[channelId]) return null;
+    const existing = this.channelFlangers.get(channelId);
+    if (existing) {
+      if (existing.cleanupTimer !== null) window.clearTimeout(existing.cleanupTimer);
+      existing.cleanupTimer = null;
+      return existing;
+    }
+
+    const send = this.ctx.createGain();
+    const delay = this.ctx.createDelay(0.03);
+    const feedback = this.ctx.createGain();
+    const wet = this.ctx.createGain();
+    const lfo = this.ctx.createOscillator();
+    const depth = this.ctx.createGain();
+    send.gain.value = 0;
+    delay.delayTime.value = 0.004;
+    lfo.type = "sine";
+    this.channels[channelId].panner.connect(send);
+    send.connect(delay);
+    delay.connect(wet);
+    wet.connect(this.masterGain);
+    delay.connect(feedback);
+    feedback.connect(delay);
+    lfo.connect(depth);
+    depth.connect(delay.delayTime);
+    lfo.start();
+
+    const unit = { channelId, send, delay, feedback, wet, lfo, depth, cleanupTimer: null, lfoStopped: false };
+    this.channelFlangers.set(channelId, unit);
+    this.channels[channelId].fxSends.flanger = send;
+    this.updateFlanger(channelId);
+    return unit;
+  }
+
+  updateFlanger(channelId) {
+    const unit = this.channelFlangers.get(channelId);
+    if (!unit) return;
+    const fx = getChannelFxState(channelId);
+    this.setSmooth(unit.lfo.frequency, fx.flangerRate);
+    this.setSmooth(unit.depth.gain, 0.0018);
+    this.setSmooth(unit.feedback.gain, state.fx.enabled[channelId].flanger ? clamp(fx.flangerFeedback, 0, 0.75) * 0.75 : 0);
+    this.setSmooth(unit.wet.gain, 0.55);
+  }
+
+  scheduleFlangerDisposal(channelId) {
+    const unit = this.channelFlangers.get(channelId);
+    if (!unit || unit.cleanupTimer !== null) return;
+    this.setSmooth(unit.send.gain, 0);
+    this.setSmooth(unit.feedback.gain, 0, 0.035);
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (!state.fx.enabled[channelId].flanger) this.disposeChannelFlanger(channelId);
+    }, 240);
+  }
+
+  disposeChannelFlanger(channelId) {
+    const unit = this.channelFlangers.get(channelId);
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.cleanupTimer = null;
+    const now = this.ctx?.currentTime || 0;
+    unit.send.gain.cancelScheduledValues(now);
+    unit.send.gain.setValueAtTime(0, now);
+    unit.feedback.gain.cancelScheduledValues(now);
+    unit.feedback.gain.setValueAtTime(0, now);
+    if (!unit.lfoStopped) {
+      unit.lfo.stop(now);
+      unit.lfoStopped = true;
+    }
+    this.channels[channelId].panner.disconnect(unit.send);
+    [unit.send, unit.delay, unit.feedback, unit.wet, unit.lfo, unit.depth].forEach((node) => node.disconnect());
+    if (this.channels[channelId]?.fxSends?.flanger === unit.send) delete this.channels[channelId].fxSends.flanger;
+    this.channelFlangers.delete(channelId);
+  }
+
+  disposeAllChannelFlangers() {
+    [...this.channelFlangers.keys()].forEach((channelId) => this.disposeChannelFlanger(channelId));
+  }
+
   setSmooth(param, value, timeConstant = 0.018, linear = false) {
     if (!this.ctx || !param) return;
     const now = this.ctx.currentTime;
@@ -596,6 +779,36 @@ class AudioEngine {
       this.setSmooth(unit.send.gain, state.fx.sends[channelId].delay);
       return;
     }
+    if (effect === "chorus") {
+      if (!state.fx.enabled[channelId].chorus) {
+        this.scheduleChorusDisposal(channelId);
+        return;
+      }
+      const unit = this.createChannelChorus(channelId);
+      this.updateChorus(channelId);
+      this.setSmooth(unit.send.gain, state.fx.sends[channelId].chorus);
+      return;
+    }
+    if (effect === "phaser") {
+      if (!state.fx.enabled[channelId].phaser) {
+        this.schedulePhaserDisposal(channelId);
+        return;
+      }
+      const unit = this.createChannelPhaser(channelId);
+      this.updatePhaser(channelId);
+      this.setSmooth(unit.send.gain, state.fx.sends[channelId].phaser);
+      return;
+    }
+    if (effect === "flanger") {
+      if (!state.fx.enabled[channelId].flanger) {
+        this.scheduleFlangerDisposal(channelId);
+        return;
+      }
+      const unit = this.createChannelFlanger(channelId);
+      this.updateFlanger(channelId);
+      this.setSmooth(unit.send.gain, state.fx.sends[channelId].flanger);
+      return;
+    }
     const send = this.channels[channelId]?.fxSends?.[effect];
     if (!send) return;
     const enabled = state.fx.enabled[channelId][effect];
@@ -620,27 +833,24 @@ class AudioEngine {
       this.updateDelay(channelId);
       return;
     }
+    if (effect === "chorus") {
+      this.updateChorus(channelId);
+      return;
+    }
+    if (effect === "phaser") {
+      this.updatePhaser(channelId);
+      return;
+    }
+    if (effect === "flanger") {
+      this.updateFlanger(channelId);
+      return;
+    }
     const fx = getChannelFxState(channelId);
     const unit = this.effects[effect];
     if (!unit) return;
     if (effect === "reverb") {
       this.setSmooth(unit.filter.frequency, fx.reverbDamping);
       this.setSmooth(unit.wet.gain, 0.78);
-    } else if (effect === "phaser") {
-      this.setSmooth(unit.lfo.frequency, fx.phaserRate);
-      unit.depths.forEach((depth, index) => {
-        this.setSmooth(depth.gain, [260, 470, 780, 1150][index] * fx.phaserDepth);
-      });
-      this.setSmooth(unit.wet.gain, 0.62);
-    } else if (effect === "chorus") {
-      this.setSmooth(unit.lfo.frequency, fx.chorusRate);
-      this.setSmooth(unit.depth.gain, 0.001 + fx.chorusDepth * 0.0065);
-      this.setSmooth(unit.wet.gain, 0.62);
-    } else if (effect === "flanger") {
-      this.setSmooth(unit.lfo.frequency, fx.flangerRate);
-      this.setSmooth(unit.depth.gain, 0.0018);
-      this.setSmooth(unit.feedback.gain, clamp(fx.flangerFeedback, 0, 0.75) * 0.75);
-      this.setSmooth(unit.wet.gain, 0.55);
     }
   }
 
@@ -708,11 +918,16 @@ class AudioEngine {
     });
   }
 
-  stopVoices(disposeDelays = true) {
+  stopVoices(disposeEffects = true) {
     this.drumPreviewRequests = {};
     this.stopBassVoices();
     if (this.ctx) this.fadeDrumVoices(this.ctx.currentTime);
-    if (disposeDelays) this.disposeAllChannelDelays();
+    if (disposeEffects) {
+      this.disposeAllChannelDelays();
+      this.disposeAllChannelChoruses();
+      this.disposeAllChannelPhasers();
+      this.disposeAllChannelFlangers();
+    }
   }
 
   makeDriveCurve(amount) {
@@ -1001,6 +1216,9 @@ class AudioEngine {
     await this.init();
     if (this.drumPreviewRequests[track] !== request || state.playing || state.starting) return;
     this.updateEffectSend(track, "delay");
+    this.updateEffectSend(track, "chorus");
+    this.updateEffectSend(track, "phaser");
+    this.updateEffectSend(track, "flanger");
     const time = this.ctx.currentTime + 0.012;
     this.fadeDrumVoices(time, track);
     return this.scheduleDrum(track, time, level);
@@ -1014,6 +1232,9 @@ class AudioEngine {
     await this.init();
     if (request !== this.bassPreviewRequest || state.playing || state.starting) return;
     this.updateEffectSend("bass", "delay");
+    this.updateEffectSend("bass", "chorus");
+    this.updateEffectSend("bass", "phaser");
+    this.updateEffectSend("bass", "flanger");
     return this.scheduleBass(previewStep, this.ctx.currentTime + 0.012, 0.34, null);
   }
 }
