@@ -219,26 +219,18 @@ test("only reverb remains global while delay and modulation effects are lazy", a
   assert.equal(engine.channelChoruses.size, 0);
   assert.equal(engine.channelPhasers.size, 0);
   assert.equal(engine.channelFlangers.size, 0);
+  assert.equal(engine.channelReverbs.size, 0);
   assert.equal(Object.keys(engine.effects.reverb.banks).length, 3);
+  assert.equal(Object.values(engine.effects.reverb.banks).filter((bank) => bank.convolver.kind === "convolver").length, 3);
 });
 
-test("only the global reverb creates eager channel sends", async () => {
+test("no per-channel FX send is created eagerly", async () => {
   const { engine, CHANNELS } = setup();
   await engine.init();
-  const sends = new Set();
-  const globalEffects = ["reverb"];
 
   CHANNELS.forEach(({ id }) => {
-    assert.deepEqual(Object.keys(engine.channels[id].fxSends), globalEffects);
-    globalEffects.forEach((effect) => {
-      const send = engine.channels[id].fxSends[effect];
-      sends.add(send);
-      assert.equal(send.connections.length, 1);
-      assert.equal(send.connections[0], engine.effects[effect].input);
-    });
+    assert.deepEqual(Object.keys(engine.channels[id].fxSends), []);
   });
-
-  assert.equal(sends.size, CHANNELS.length * globalEffects.length);
 });
 
 test("send, enablement, and parameter state are independent per channel", async () => {
@@ -316,12 +308,13 @@ test("snare and bass use independent delay processors and parameter automation",
 
 test("FX controls edit and reload the selected channel's parameter values", () => {
   const delayTime = fxControl("delayTime", 310, 55, 900);
+  const reverbDamping = fxControl("reverbDamping", 6500, 1000, 14000);
   const tape = prepareModeButton("delayMode", "tape");
   const digital = prepareModeButton("delayMode", "digital");
   const room = prepareModeButton("reverbMode", "room");
   const hall = prepareModeButton("reverbMode", "hall");
   const { state, bindEffects, renderFxChannel } = setup({
-    fxControls: [delayTime],
+    fxControls: [delayTime, reverbDamping],
     delayModeButtons: [tape, digital],
     reverbModeButtons: [room, hall],
   });
@@ -330,18 +323,24 @@ test("FX controls edit and reload the selected channel's parameter values", () =
   state.selectedFxChannel = "snare";
   state.fx.channels.snare.delayMode = "digital";
   state.fx.channels.snare.reverbMode = "hall";
+  state.fx.channels.snare.reverbDamping = 3200;
   renderFxChannel();
   assert.equal(digital.active, true);
   assert.equal(tape.active, false);
   assert.equal(hall.active, true);
   assert.equal(room.active, false);
+  assert.equal(reverbDamping.input.value, "3200");
   delayTime.inputValue(180);
+  reverbDamping.inputValue(4100);
   assert.equal(state.fx.channels.snare.delayTime, 0.18);
+  assert.equal(state.fx.channels.snare.reverbDamping, 4100);
   assert.equal(state.fx.channels.bass.delayTime, 0.31);
+  assert.equal(state.fx.channels.bass.reverbDamping, 6500);
 
   state.selectedFxChannel = "bass";
   renderFxChannel();
   assert.equal(delayTime.input.value, "310");
+  assert.equal(reverbDamping.input.value, "6500");
   assert.equal(tape.active, true);
   assert.equal(room.active, true);
   digital.click();
@@ -352,6 +351,7 @@ test("FX controls edit and reload the selected channel's parameter values", () =
   state.selectedFxChannel = "snare";
   renderFxChannel();
   assert.equal(delayTime.input.value, "180");
+  assert.equal(reverbDamping.input.value, "4100");
   assert.equal(state.fx.channels.snare.delayTime, 0.18);
   assert.equal(state.fx.channels.snare.reverbMode, "hall");
 });
@@ -360,7 +360,7 @@ test("delay instances are lazy and add seven active nodes per enabled channel", 
   const { state, engine, ctx, CHANNELS } = setup();
   await engine.init();
 
-  assert.equal(ctx.nodes.length, 89);
+  assert.equal(ctx.nodes.length, 75);
   assert.equal(ctx.buffers.length, 4, "one shared noise buffer plus three reverb impulses");
   assert.equal(ctx.buffers.filter((buffer) => buffer.channels === 2).length, 3);
   assert.equal(ctx.startedSources.length, 0, "no modulation LFO starts eagerly");
@@ -369,14 +369,14 @@ test("delay instances are lazy and add seven active nodes per enabled channel", 
   state.fx.enabled.bass.delay = true;
   engine.updateEffectSend("snare", "delay");
   engine.updateEffectSend("bass", "delay");
-  assert.equal(ctx.nodes.length, 103);
+  assert.equal(ctx.nodes.length, 89);
   assert.equal(engine.channelDelays.size, 2);
 
   CHANNELS.map(({ id }) => id).filter((id) => !["snare", "bass"].includes(id)).forEach((id) => {
     state.fx.enabled[id].delay = true;
     engine.updateEffectSend(id, "delay");
   });
-  assert.equal(ctx.nodes.length, 131);
+  assert.equal(ctx.nodes.length, 117);
   assert.equal(engine.channelDelays.size, 6);
 });
 
@@ -406,7 +406,7 @@ test("disabling delays preserves a bounded tail and then restores the idle graph
   api.runTimeouts();
   assert.equal(api.engine.channelDelays.size, 0);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.activeNodeCount(), 89);
+  assert.equal(api.activeNodeCount(), 75);
   units.forEach((unit) => {
     assert.equal(unit.lfo.stopped, true);
     assert.ok([unit.send, unit.delay, unit.tone, unit.feedback, unit.wet, unit.lfo, unit.lfoDepth]
@@ -483,7 +483,7 @@ test("STOP and pagehide synchronously dispose delay instances, timers, LFOs, and
   api.handlePageHide();
   assert.equal(api.engine.channelDelays.size, 0);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.activeNodeCount(), 89);
+  assert.equal(api.activeNodeCount(), 75);
   assert.ok(units.every((unit) => unit.lfo.stopped && unit.lfo.disconnected));
   assert.ok(units.every((unit) => !api.engine.channels[unit.channelId].panner.connections.includes(unit.send)));
 });
@@ -501,7 +501,7 @@ test("repeated delay activation cycles return to the permanent-node baseline", a
   }
   assert.equal(api.engine.channelDelays.size, 0);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.activeNodeCount(), 89);
+  assert.equal(api.activeNodeCount(), 75);
 });
 
 test("chorus instances are independent, lazy, and keep automation bounded", async () => {
@@ -544,7 +544,7 @@ test("chorus cleanup is quick, reusable during its tail, and returns to baseline
   api.engine.updateEffectSend("snare", "chorus");
   const unit = api.engine.channelChoruses.get("snare");
   const createdNodes = api.ctx.nodes.length;
-  assert.equal(createdNodes, 94);
+  assert.equal(createdNodes, 80);
 
   api.state.fx.enabled.snare.chorus = false;
   api.engine.updateEffectSend("snare", "chorus");
@@ -560,7 +560,7 @@ test("chorus cleanup is quick, reusable during its tail, and returns to baseline
   api.runTimeouts();
   assert.equal(api.engine.channelChoruses.size, 0);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.activeNodeCount(), 89);
+  assert.equal(api.activeNodeCount(), 75);
   assert.equal(unit.lfo.stopped, true);
   assert.ok([unit.send, unit.delay, unit.wet, unit.lfo, unit.depth].every((node) => node.disconnected));
   assert.ok(!api.engine.channels.snare.panner.connections.includes(unit.send));
@@ -606,7 +606,7 @@ test("phaser cleanup disconnects every modulation route and can reuse a pending 
   api.engine.updateEffectSend("bass", "phaser");
   const snare = api.engine.channelPhasers.get("snare");
   const bass = api.engine.channelPhasers.get("bass");
-  assert.equal(api.ctx.nodes.length, 111);
+  assert.equal(api.ctx.nodes.length, 97);
 
   api.state.fx.enabled.snare.phaser = false;
   api.engine.updateEffectSend("snare", "phaser");
@@ -614,7 +614,7 @@ test("phaser cleanup disconnects every modulation route and can reuse a pending 
   api.engine.updateEffectSend("snare", "phaser");
   assert.equal(api.engine.channelPhasers.get("snare"), snare);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.ctx.nodes.length, 111);
+  assert.equal(api.ctx.nodes.length, 97);
 
   api.state.fx.enabled.snare.phaser = false;
   api.state.fx.enabled.bass.phaser = false;
@@ -623,7 +623,7 @@ test("phaser cleanup disconnects every modulation route and can reuse a pending 
   api.runTimeouts();
   assert.equal(api.engine.channelPhasers.size, 0);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.activeNodeCount(), 89);
+  assert.equal(api.activeNodeCount(), 75);
   [snare, bass].forEach((unit) => {
     assert.equal(unit.lfo.stopped, true);
     assert.ok([unit.send, ...unit.filters, unit.wet, unit.lfo, ...unit.depths].every((node) => node.disconnected));
@@ -676,7 +676,7 @@ test("flanger tail neutralizes feedback, reuses pending nodes, and cleans every 
   api.engine.updateEffectSend("bass", "flanger");
   const snare = api.engine.channelFlangers.get("snare");
   const bass = api.engine.channelFlangers.get("bass");
-  assert.equal(api.ctx.nodes.length, 101);
+  assert.equal(api.ctx.nodes.length, 87);
 
   api.state.fx.enabled.snare.flanger = false;
   api.state.fx.enabled.bass.flanger = false;
@@ -690,7 +690,7 @@ test("flanger tail neutralizes feedback, reuses pending nodes, and cleans every 
   api.engine.updateEffectSend("snare", "flanger");
   assert.equal(api.engine.channelFlangers.get("snare"), snare);
   assert.equal(api.callbacks.size, 1);
-  assert.equal(api.ctx.nodes.length, 101);
+  assert.equal(api.ctx.nodes.length, 87);
   api.state.fx.enabled.snare.flanger = false;
   api.engine.updateEffectSend("snare", "flanger");
   api.state.fx.channels.snare.flangerFeedback = 0.75;
@@ -700,7 +700,7 @@ test("flanger tail neutralizes feedback, reuses pending nodes, and cleans every 
   api.runTimeouts();
   assert.equal(api.engine.channelFlangers.size, 0);
   assert.equal(api.callbacks.size, 0);
-  assert.equal(api.activeNodeCount(), 89);
+  assert.equal(api.activeNodeCount(), 75);
   [snare, bass].forEach((unit) => {
     assert.equal(unit.lfo.stopped, true);
     assert.ok([unit.send, unit.delay, unit.feedback, unit.wet, unit.lfo, unit.depth].every((node) => node.disconnected));
@@ -708,11 +708,11 @@ test("flanger tail neutralizes feedback, reuses pending nodes, and cleans every 
   });
 });
 
-test("STOP and pagehide dispose every lazy FX family without orphaned LFOs", async () => {
+test("STOP and pagehide dispose every lazy FX family without orphaned routes or LFOs", async () => {
   const api = setup();
   await api.engine.init();
   const enableAllForSnare = () => {
-    ["delay", "chorus", "phaser", "flanger"].forEach((effect) => {
+    ["delay", "chorus", "phaser", "flanger", "reverb"].forEach((effect) => {
       api.state.fx.enabled.snare[effect] = true;
       api.engine.updateEffectSend("snare", effect);
     });
@@ -721,6 +721,7 @@ test("STOP and pagehide dispose every lazy FX family without orphaned LFOs", asy
       api.engine.channelChoruses.get("snare"),
       api.engine.channelPhasers.get("snare"),
       api.engine.channelFlangers.get("snare"),
+      api.engine.channelReverbs.get("snare"),
     ];
   };
   const assertDisposed = (units) => {
@@ -728,13 +729,18 @@ test("STOP and pagehide dispose every lazy FX family without orphaned LFOs", asy
     assert.equal(api.engine.channelChoruses.size, 0);
     assert.equal(api.engine.channelPhasers.size, 0);
     assert.equal(api.engine.channelFlangers.size, 0);
+    assert.equal(api.engine.channelReverbs.size, 0);
     assert.equal(api.callbacks.size, 0);
-    assert.equal(api.activeNodeCount(), 89);
-    assert.ok(units.every((unit) => unit.lfo.stopped && unit.lfo.disconnected));
+    assert.equal(api.activeNodeCount(), 75);
+    assert.ok(units.filter((unit) => unit.lfo).every((unit) => unit.lfo.stopped && unit.lfo.disconnected));
+    assert.ok(units.every((unit) => unit.send.disconnected));
+    const reverb = units.at(-1);
+    assert.ok([reverb.damping, ...Object.values(reverb.presetGains)].every((node) => node.disconnected));
+    assert.ok(units.every((unit) => !api.engine.channels.snare.panner.connections.includes(unit.send)));
   };
 
   let units = enableAllForSnare();
-  assert.equal(api.activeNodeCount(), 118);
+  assert.equal(api.activeNodeCount(), 109);
   api.stopTransport();
   assertDisposed(units);
 
@@ -743,20 +749,160 @@ test("STOP and pagehide dispose every lazy FX family without orphaned LFOs", asy
   assertDisposed(units);
 });
 
-test("reverb preset switches reuse the three prepared convolution banks", async () => {
+test("reverb keeps exactly three shared impulses and convolvers for the whole session", async () => {
+  const { state, engine, ctx, CHANNELS } = setup();
+  await engine.init();
+  const impulses = ctx.buffers.filter((buffer) => buffer.channels === 2);
+  const convolvers = ctx.nodes.filter((node) => node.kind === "convolver");
+
+  assert.equal(impulses.length, 3);
+  assert.equal(convolvers.length, 3);
+  assert.deepEqual(Object.values(engine.effects.reverb.banks).map((bank) => bank.convolver), convolvers);
+
+  CHANNELS.forEach(({ id }, index) => {
+    state.fx.channels[id].reverbMode = ["room", "plate", "hall"][index % 3];
+    state.fx.enabled[id].reverb = true;
+    engine.updateEffectSend(id, "reverb");
+  });
+
+  assert.equal(engine.channelReverbs.size, CHANNELS.length);
+  assert.equal(ctx.nodes.filter((node) => node.kind === "convolver").length, 3);
+  assert.equal(ctx.buffers.filter((buffer) => buffer.channels === 2).length, 3);
+  assert.equal(ctx.nodes.length, 105, "six routes add five nodes each to the 75-node baseline");
+});
+
+test("two channels own isolated reverb damping and preset routes", async () => {
   const { state, engine, ctx } = setup();
   await engine.init();
-  const fx = state.fx.channels[state.selectedFxChannel];
+  Object.assign(state.fx.channels.snare, { reverbMode: "room", reverbDamping: 2800 });
+  Object.assign(state.fx.channels.bass, { reverbMode: "hall", reverbDamping: 11000 });
+  state.fx.enabled.snare.reverb = true;
+  state.fx.enabled.bass.reverb = true;
+  engine.updateEffectSend("snare", "reverb");
+  engine.updateEffectSend("bass", "reverb");
+
+  const snare = engine.channelReverbs.get("snare");
+  const bass = engine.channelReverbs.get("bass");
+  assert.equal(engine.channelReverbs.size, 2);
+  assert.equal(ctx.nodes.length, 85);
+  assert.notEqual(snare.damping, bass.damping);
+  assert.notEqual(snare.presetGains.room, bass.presetGains.room);
+  assert.equal(snare.damping.frequency.value, 2800);
+  assert.equal(bass.damping.frequency.value, 11000);
+  assert.equal(snare.presetGains.room.gain.value, 1);
+  assert.equal(snare.presetGains.hall.gain.value, 0);
+  assert.equal(bass.presetGains.room.gain.value, 0);
+  assert.equal(bass.presetGains.hall.gain.value, 1);
+  assert.ok(snare.presetGains.room.connections.includes(engine.effects.reverb.banks.room.convolver));
+  assert.ok(bass.presetGains.hall.connections.includes(engine.effects.reverb.banks.hall.convolver));
+
+  const snareSnapshot = {
+    damping: snare.damping.frequency.value,
+    dampingEvents: snare.damping.frequency.events.length,
+    gains: Object.values(snare.presetGains).map((gain) => gain.gain.value),
+    gainEvents: Object.values(snare.presetGains).map((gain) => gain.gain.events.length),
+  };
+  Object.assign(state.fx.channels.bass, { reverbMode: "plate", reverbDamping: 6400 });
+  engine.updateEffect("reverb", "bass");
+
+  assert.deepEqual({
+    damping: snare.damping.frequency.value,
+    dampingEvents: snare.damping.frequency.events.length,
+    gains: Object.values(snare.presetGains).map((gain) => gain.gain.value),
+    gainEvents: Object.values(snare.presetGains).map((gain) => gain.gain.events.length),
+  }, snareSnapshot);
+  assert.equal(bass.damping.frequency.value, 6400);
+  assert.equal(bass.presetGains.room.gain.value, 0);
+  assert.equal(bass.presetGains.plate.gain.value, 1);
+  assert.equal(bass.presetGains.hall.gain.value, 0);
+});
+
+test("reverb crossfades stay bounded and repeated preset changes allocate nothing", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+  const channelId = "snare";
+  state.fx.enabled[channelId].reverb = true;
+  engine.updateEffectSend(channelId, "reverb");
+  const route = engine.channelReverbs.get(channelId);
   const initialNodes = ctx.nodes.length;
   const initialBuffers = ctx.buffers.length;
   const convolvers = Object.values(engine.effects.reverb.banks).map((bank) => bank.convolver);
 
-  for (let index = 0; index < 1200; index += 1) {
-    fx.reverbMode = ["room", "plate", "hall"][index % 3];
-    engine.rebuildReverb();
+  for (let index = 0; index < 4000; index += 1) {
+    ctx.currentTime += 0.003;
+    state.fx.channels[channelId].reverbMode = ["room", "plate", "hall"][index % 3];
+    state.fx.channels[channelId].reverbDamping = 1500 + (index % 100) * 120;
+    engine.rebuildReverb(channelId);
+    assert.ok(route.damping.frequency.events.length <= 2);
+    Object.values(route.presetGains).forEach((gain) => assert.ok(gain.gain.events.length <= 2));
   }
 
   assert.equal(ctx.nodes.length, initialNodes);
   assert.equal(ctx.buffers.length, initialBuffers);
   assert.deepEqual(Object.values(engine.effects.reverb.banks).map((bank) => bank.convolver), convolvers);
+  Object.entries(route.presetGains).forEach(([mode, gain]) => {
+    assert.equal(gain.gain.value, mode === state.fx.channels[channelId].reverbMode ? 1 : 0);
+  });
+});
+
+test("reverb cleanup preserves shared tails, isolates other channels, and reuses a pending route", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.state.fx.enabled.snare.reverb = true;
+  api.state.fx.enabled.bass.reverb = true;
+  api.engine.updateEffectSend("snare", "reverb");
+  api.engine.updateEffectSend("bass", "reverb");
+  const snare = api.engine.channelReverbs.get("snare");
+  const bass = api.engine.channelReverbs.get("bass");
+  const createdNodes = api.ctx.nodes.length;
+  const bassSnapshot = Object.values(bass.presetGains).map((gain) => gain.gain.value);
+
+  api.state.fx.enabled.snare.reverb = false;
+  api.engine.updateEffectSend("snare", "reverb");
+  assert.equal(api.callbacks.size, 1);
+  assert.equal(api.engine.channelReverbs.get("snare"), snare);
+  assert.equal(snare.send.gain.value, 0);
+  assert.deepEqual(Object.values(snare.presetGains).map((gain) => gain.gain.value), [0, 0, 0]);
+  assert.deepEqual(Object.values(bass.presetGains).map((gain) => gain.gain.value), bassSnapshot);
+
+  api.state.fx.enabled.snare.reverb = true;
+  api.engine.updateEffectSend("snare", "reverb");
+  assert.equal(api.callbacks.size, 0);
+  assert.equal(api.engine.channelReverbs.get("snare"), snare);
+  assert.equal(api.ctx.nodes.length, createdNodes);
+
+  api.state.fx.enabled.snare.reverb = false;
+  api.engine.updateEffectSend("snare", "reverb");
+  api.runTimeouts();
+  assert.equal(api.engine.channelReverbs.size, 1);
+  assert.equal(api.engine.channelReverbs.get("bass"), bass);
+  assert.equal(api.activeNodeCount(), 80);
+  assert.ok([snare.send, snare.damping, ...Object.values(snare.presetGains)].every((node) => node.disconnected));
+  assert.ok(Object.values(api.engine.effects.reverb.banks).every((bank) => !bank.convolver.disconnected));
+  assert.equal(api.ctx.nodes.filter((node) => node.kind === "convolver").length, 3);
+
+  api.state.fx.enabled.bass.reverb = false;
+  api.engine.updateEffectSend("bass", "reverb");
+  api.runTimeouts();
+  assert.equal(api.engine.channelReverbs.size, 0);
+  assert.equal(api.callbacks.size, 0);
+  assert.equal(api.activeNodeCount(), 75);
+});
+
+test("repeated reverb activation cycles return to the permanent-node baseline", async () => {
+  const api = setup();
+  await api.engine.init();
+  for (let index = 0; index < 1200; index += 1) {
+    const channelId = index % 2 ? "snare" : "bass";
+    api.state.fx.enabled[channelId].reverb = true;
+    api.engine.updateEffectSend(channelId, "reverb");
+    api.state.fx.enabled[channelId].reverb = false;
+    api.engine.updateEffectSend(channelId, "reverb");
+    api.runTimeouts();
+  }
+  assert.equal(api.engine.channelReverbs.size, 0);
+  assert.equal(api.callbacks.size, 0);
+  assert.equal(api.activeNodeCount(), 75);
+  assert.equal(api.ctx.nodes.filter((node) => node.kind === "convolver").length, 3);
+  assert.equal(api.ctx.buffers.filter((buffer) => buffer.channels === 2).length, 3);
 });

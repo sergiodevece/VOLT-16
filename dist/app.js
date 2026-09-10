@@ -216,6 +216,7 @@ class AudioEngine {
     this.channelChoruses = new Map();
     this.channelPhasers = new Map();
     this.channelFlangers = new Map();
+    this.channelReverbs = new Map();
     this.driveCache = new Map();
     this.smoothParams = new WeakMap();
     this.bassVoices = new Set();
@@ -339,46 +340,25 @@ class AudioEngine {
 
   setupEffects() {
     const ctx = this.ctx;
-    const fx = getChannelFxState();
-
-    const reverbInput = ctx.createGain();
-    const reverbFilter = ctx.createBiquadFilter();
     const reverbWet = ctx.createGain();
-    reverbFilter.type = "lowpass";
-    reverbInput.connect(reverbFilter);
+    reverbWet.gain.value = 0.78;
     reverbWet.connect(this.masterGain);
-    // Prepare a bounded bank before scheduling music. Switching modes only
-    // fades gains; it never allocates an impulse or replaces a running kernel.
-    // Gate both ends so inactive banks receive silence and can finish their tail.
+    // Convolution is linear, so channels with the same preset can share its
+    // kernel after their independent damping and preset gains have been applied.
     const banks = {};
     Object.keys(REVERB_PRESETS).forEach((mode) => {
-      const input = ctx.createGain();
       const convolver = ctx.createConvolver();
-      const output = ctx.createGain();
-      input.gain.value = output.gain.value = mode === fx.reverbMode ? 1 : 0;
       convolver.buffer = this.createReverbImpulse(mode);
-      reverbFilter.connect(input);
-      input.connect(convolver);
-      convolver.connect(output);
-      output.connect(reverbWet);
-      banks[mode] = { input, convolver, output };
+      convolver.connect(reverbWet);
+      banks[mode] = { convolver };
     });
-    this.effects.reverb = { input: reverbInput, filter: reverbFilter, banks, wet: reverbWet };
+    this.effects.reverb = { banks, wet: reverbWet };
 
   }
 
   setupEffectSends() {
     CHANNELS.forEach(({ id }) => {
-      const channel = this.channels[id];
-      channel.fxSends = {};
-      FX_NAMES.forEach((effect) => {
-        if (["delay", "chorus", "phaser", "flanger"].includes(effect)) return;
-        const send = this.ctx.createGain();
-        send.gain.value = 0;
-        channel.panner.connect(send);
-        send.connect(this.effects[effect].input);
-        channel.fxSends[effect] = send;
-      });
+      this.channels[id].fxSends = {};
     });
   }
 
@@ -709,6 +689,81 @@ class AudioEngine {
     [...this.channelFlangers.keys()].forEach((channelId) => this.disposeChannelFlanger(channelId));
   }
 
+  createChannelReverb(channelId) {
+    if (!this.ctx || !this.channels[channelId] || !this.effects.reverb) return null;
+    const existing = this.channelReverbs.get(channelId);
+    if (existing) {
+      if (existing.cleanupTimer !== null) window.clearTimeout(existing.cleanupTimer);
+      existing.cleanupTimer = null;
+      return existing;
+    }
+
+    const send = this.ctx.createGain();
+    const damping = this.ctx.createBiquadFilter();
+    const presetGains = Object.fromEntries(Object.keys(REVERB_PRESETS).map((mode) => [mode, this.ctx.createGain()]));
+    send.gain.value = 0;
+    damping.type = "lowpass";
+    this.channels[channelId].panner.connect(send);
+    send.connect(damping);
+    Object.entries(presetGains).forEach(([mode, gain]) => {
+      gain.gain.value = 0;
+      damping.connect(gain);
+      gain.connect(this.effects.reverb.banks[mode].convolver);
+    });
+
+    const unit = { channelId, send, damping, presetGains, cleanupTimer: null };
+    this.channelReverbs.set(channelId, unit);
+    this.channels[channelId].fxSends.reverb = send;
+    this.updateReverb(channelId);
+    return unit;
+  }
+
+  updateReverb(channelId) {
+    const unit = this.channelReverbs.get(channelId);
+    if (!unit) return;
+    const fx = getChannelFxState(channelId);
+    this.setSmooth(unit.damping.frequency, fx.reverbDamping);
+    Object.entries(unit.presetGains).forEach(([mode, gain]) => {
+      const active = state.fx.enabled[channelId].reverb && mode === fx.reverbMode ? 1 : 0;
+      this.setSmooth(gain.gain, active, 0.07, true);
+    });
+  }
+
+  scheduleReverbDisposal(channelId) {
+    const unit = this.channelReverbs.get(channelId);
+    if (!unit || unit.cleanupTimer !== null) return;
+    this.setSmooth(unit.send.gain, 0);
+    Object.values(unit.presetGains).forEach((gain) => this.setSmooth(gain.gain, 0, 0.07, true));
+    // The shared convolvers retain already-received audio, so this input route
+    // can be removed after its fade without cutting any channel's reverb tail.
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (!state.fx.enabled[channelId].reverb) this.disposeChannelReverb(channelId);
+    }, 120);
+  }
+
+  disposeChannelReverb(channelId) {
+    const unit = this.channelReverbs.get(channelId);
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.cleanupTimer = null;
+    const now = this.ctx?.currentTime || 0;
+    unit.send.gain.cancelScheduledValues(now);
+    unit.send.gain.setValueAtTime(0, now);
+    Object.values(unit.presetGains).forEach((gain) => {
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(0, now);
+    });
+    this.channels[channelId].panner.disconnect(unit.send);
+    [unit.send, unit.damping, ...Object.values(unit.presetGains)].forEach((node) => node.disconnect());
+    if (this.channels[channelId]?.fxSends?.reverb === unit.send) delete this.channels[channelId].fxSends.reverb;
+    this.channelReverbs.delete(channelId);
+  }
+
+  disposeAllChannelReverbs() {
+    [...this.channelReverbs.keys()].forEach((channelId) => this.disposeChannelReverb(channelId));
+  }
+
   setSmooth(param, value, timeConstant = 0.018, linear = false) {
     if (!this.ctx || !param) return;
     const now = this.ctx.currentTime;
@@ -809,11 +864,15 @@ class AudioEngine {
       this.setSmooth(unit.send.gain, state.fx.sends[channelId].flanger);
       return;
     }
-    const send = this.channels[channelId]?.fxSends?.[effect];
-    if (!send) return;
-    const enabled = state.fx.enabled[channelId][effect];
-    const amount = state.fx.sends[channelId][effect];
-    this.setSmooth(send.gain, enabled ? amount : 0);
+    if (effect === "reverb") {
+      if (!state.fx.enabled[channelId].reverb) {
+        this.scheduleReverbDisposal(channelId);
+        return;
+      }
+      const unit = this.createChannelReverb(channelId);
+      this.updateReverb(channelId);
+      this.setSmooth(unit.send.gain, state.fx.sends[channelId].reverb);
+    }
   }
 
   updateAllEffectSends() {
@@ -845,24 +904,13 @@ class AudioEngine {
       this.updateFlanger(channelId);
       return;
     }
-    const fx = getChannelFxState(channelId);
-    const unit = this.effects[effect];
-    if (!unit) return;
     if (effect === "reverb") {
-      this.setSmooth(unit.filter.frequency, fx.reverbDamping);
-      this.setSmooth(unit.wet.gain, 0.78);
+      this.updateReverb(channelId);
     }
   }
 
   rebuildReverb(channelId = state.selectedFxChannel) {
-    if (!this.ctx || !this.effects.reverb) return;
-    const fx = getChannelFxState(channelId);
-    Object.entries(this.effects.reverb.banks).forEach(([mode, bank]) => {
-      const active = mode === fx.reverbMode ? 1 : 0;
-      // Finish at exactly zero so inactive convolution banks can become idle.
-      this.setSmooth(bank.input.gain, active, 0.07, true);
-      this.setSmooth(bank.output.gain, active, 0.07, true);
-    });
+    this.updateReverb(channelId);
   }
 
   createReverbImpulse(mode) {
@@ -927,6 +975,7 @@ class AudioEngine {
       this.disposeAllChannelChoruses();
       this.disposeAllChannelPhasers();
       this.disposeAllChannelFlangers();
+      this.disposeAllChannelReverbs();
     }
   }
 
@@ -1219,6 +1268,7 @@ class AudioEngine {
     this.updateEffectSend(track, "chorus");
     this.updateEffectSend(track, "phaser");
     this.updateEffectSend(track, "flanger");
+    this.updateEffectSend(track, "reverb");
     const time = this.ctx.currentTime + 0.012;
     this.fadeDrumVoices(time, track);
     return this.scheduleDrum(track, time, level);
@@ -1235,6 +1285,7 @@ class AudioEngine {
     this.updateEffectSend("bass", "chorus");
     this.updateEffectSend("bass", "phaser");
     this.updateEffectSend("bass", "flanger");
+    this.updateEffectSend("bass", "reverb");
     return this.scheduleBass(previewStep, this.ctx.currentTime + 0.012, 0.34, null);
   }
 }

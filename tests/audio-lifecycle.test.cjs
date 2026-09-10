@@ -182,25 +182,27 @@ test("rapid continuous controls stay continuous, bound automation, and ignore id
 
 test("reverb switches reuse prepared buffers and nodes, without replacing a live impulse", async () => {
   const { state, engine, ctx } = setup(); await engine.init();
+  const channelId = state.selectedFxChannel;
+  const fx = state.fx.channels[channelId];
+  state.fx.enabled[channelId].reverb = true;
+  engine.updateEffectSend(channelId, "reverb");
+  const route = engine.channelReverbs.get(channelId);
   const nodes = ctx.created; const buffers = ctx.buffers;
-  const fx = state.fx.channels[state.selectedFxChannel];
   for (let index = 0; index < 1200; index += 1) {
     ctx.currentTime += 0.01;
     fx.reverbMode = ["room", "plate", "hall"][index % 3];
-    const banks = engine.effects.reverb.banks;
-    const before = banks && Object.values(banks).map((bank) => bank.output.gain.valueAt(ctx.currentTime));
+    const before = Object.values(route.presetGains).map((gain) => gain.gain.valueAt(ctx.currentTime));
     engine.rebuildReverb();
     assert.equal(ctx.buffers, buffers, "no impulse generation while turning the reverb selector");
-    if (banks) Object.values(banks).forEach((bank, i) => {
-      assert.ok(Math.abs(bank.output.gain.valueAt(ctx.currentTime) - before[i]) < 1e-9);
+    Object.values(route.presetGains).forEach((gain, i) => {
+      assert.ok(Math.abs(gain.gain.valueAt(ctx.currentTime) - before[i]) < 1e-9);
     });
   }
   assert.equal(ctx.created, nodes);
   assert.equal(ctx.buffers, buffers, "no impulse generation while turning the reverb selector");
-  for (const [mode, bank] of Object.entries(engine.effects.reverb.banks)) {
+  for (const [mode, gain] of Object.entries(route.presetGains)) {
     const target = mode === fx.reverbMode ? 1 : 0;
-    assert.equal(bank.input.gain.valueAt(ctx.currentTime + 1), target, "inactive bank must receive exact silence");
-    assert.equal(bank.output.gain.valueAt(ctx.currentTime + 1), target);
+    assert.equal(gain.gain.valueAt(ctx.currentTime + 1), target, "inactive preset route must receive exact silence");
   }
 });
 
