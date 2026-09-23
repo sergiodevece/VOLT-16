@@ -114,7 +114,9 @@ function setup() {
   const context = vm.createContext({ document, window, navigator: {}, console, performance: { now: () => 0 } });
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
-      queuePlayhead, getPlayheadTimerCount: () => playheadTimers.size ?? playheadTimers.length };
+      queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
+      getComputerJunoHeldCount: () => computerJunoHeld.size,
+      getPlayheadTimerCount: () => playheadTimers.size ?? playheadTimers.length };
   `, context);
   return { ...context.api, ctx, callbacks, document, elements };
 }
@@ -356,6 +358,38 @@ test("J-4 parameter churn allocates nothing and STOP releases every node and sou
   assert.equal(ctx.nodes.size, baselineNodes);
   assert.equal(ctx.sources.size, baselineSources);
   assert.equal(callbacks.size, 0);
+});
+
+test("Mac keyboard mapping plays polyphonic J-4 notes and releases them on tab change", async () => {
+  const api = setup();
+  const pressed = [];
+  const released = [];
+  api.engine.pressJunoKey = async (midi, id) => { pressed.push([midi, id]); };
+  api.engine.releaseJunoKey = (midi, id) => { released.push([midi, id]); };
+  api.switchTab("juno");
+  const event = (code, extra = {}) => ({
+    code, repeat: false, metaKey: false, ctrlKey: false, altKey: false,
+    target: { tagName: "BODY", isContentEditable: false },
+    preventDefault() { this.prevented = true; },
+    ...extra,
+  });
+
+  ["KeyZ", "KeyC", "KeyB", "KeyM"].forEach((code) => api.handleComputerJunoKeyDown(event(code)));
+  await Promise.resolve();
+  assert.deepEqual(pressed.map(([midi]) => midi), [60, 64, 67, 71]);
+  assert.equal(api.getComputerJunoHeldCount(), 4);
+
+  api.handleComputerJunoKeyDown(event("KeyZ", { repeat: true }));
+  api.handleComputerJunoKeyDown(event("KeyQ", { target: { tagName: "INPUT" } }));
+  assert.equal(pressed.length, 4, "key repeat and editable controls must not create notes");
+
+  api.handleComputerJunoKeyUp(event("KeyZ"));
+  assert.deepEqual(released[0], [60, "computer-KeyZ"]);
+  assert.equal(api.getComputerJunoHeldCount(), 3);
+
+  api.switchTab("mixer");
+  assert.equal(api.getComputerJunoHeldCount(), 0);
+  assert.deepEqual(released.map(([midi]) => midi).sort((a, b) => a - b), [60, 64, 67, 71]);
 });
 
 test("maximum seven-channel FX load survives parameter churn, reuse, PLAY/STOP, and final cleanup", async () => {

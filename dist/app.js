@@ -70,6 +70,15 @@ const REVERB_PRESETS = {
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const BLACK_NOTES = new Set([1, 3, 6, 8, 10]);
+const WHITE_KEY_INDEX = new Map([[0, 0], [2, 1], [4, 2], [5, 3], [7, 4], [9, 5], [11, 6]]);
+const BLACK_KEY_AFTER = new Map([[1, 0], [3, 1], [6, 3], [8, 4], [10, 5]]);
+const COMPUTER_JUNO_KEYS = new Map([
+  ["KeyZ", 60], ["KeyS", 61], ["KeyX", 62], ["KeyD", 63], ["KeyC", 64], ["KeyV", 65],
+  ["KeyG", 66], ["KeyB", 67], ["KeyH", 68], ["KeyN", 69], ["KeyJ", 70], ["KeyM", 71],
+  ["KeyQ", 72], ["Digit2", 73], ["KeyW", 74], ["Digit3", 75], ["KeyE", 76], ["KeyR", 77],
+  ["Digit5", 78], ["KeyT", 79], ["Digit6", 80], ["KeyY", 81], ["Digit7", 82], ["KeyU", 83],
+]);
+const COMPUTER_JUNO_LABELS = new Map([...COMPUTER_JUNO_KEYS].map(([code, midi]) => [midi, code.startsWith("Key") ? code.slice(3) : code.slice(5)]));
 
 const BASE_DRUM_PATTERN = {
   kick:       [2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 1, 1, 0, 0, 0],
@@ -1925,6 +1934,7 @@ let previousBassMidi = null;
 let previousStepHadBass = false;
 const playheadTimers = new Set();
 let activeTab = "drums";
+const computerJunoHeld = new Map();
 let meterAnimationFrame = null;
 let lastMeterFrame = -Infinity;
 let scopeData = null;
@@ -2033,19 +2043,50 @@ function renderDrumSequencer() {
   });
 }
 
+function configurePianoKey(button, midi, startMidi, octaveCount) {
+  const relative = midi - startMidi;
+  const octave = Math.floor(relative / 12);
+  const pitch = ((midi % 12) + 12) % 12;
+  const whiteCount = octaveCount * 7;
+  const isBlack = BLACK_NOTES.has(pitch);
+  const keyIndex = octave * 7 + (isBlack ? BLACK_KEY_AFTER.get(pitch) : WHITE_KEY_INDEX.get(pitch));
+  const widthInWhiteKeys = isBlack ? 0.62 : 1;
+  const leftInWhiteKeys = isBlack ? keyIndex + 1 - widthInWhiteKeys / 2 : keyIndex;
+  button.style.setProperty("--key-left", `${leftInWhiteKeys / whiteCount * 100}%`);
+  button.style.setProperty("--key-width", `${widthInWhiteKeys / whiteCount * 100}%`);
+  button.style.setProperty("--key-layer", isBlack ? "3" : "1");
+  return isBlack;
+}
+
+function appendPianoLabels(button, note, shortcut = "") {
+  const noteLabel = document.createElement("span");
+  noteLabel.className = "piano-note-label";
+  noteLabel.textContent = note;
+  button.append(noteLabel);
+  if (!shortcut) return;
+  const shortcutLabel = document.createElement("kbd");
+  shortcutLabel.className = "piano-shortcut";
+  shortcutLabel.textContent = shortcut;
+  button.append(shortcutLabel);
+}
+
 function renderNoteKeyboard() {
   dom.noteKeyboard.replaceChildren();
+  const bed = document.createElement("div");
+  bed.className = "piano-bed bass-piano-bed";
   const selectedMidi = state.bassPattern[state.selectedBassStep].midi;
   const selectedPitch = ((selectedMidi % 12) + 12) % 12;
   NOTE_NAMES.forEach((name, pitch) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = ["note-key", BLACK_NOTES.has(pitch) ? "is-black" : "", selectedPitch === pitch ? "is-selected" : ""].filter(Boolean).join(" ");
+    const isBlack = configurePianoKey(button, 60 + pitch, 60, 1);
+    button.className = ["note-key", "piano-key", isBlack ? "is-black" : "", selectedPitch === pitch ? "is-selected" : ""].filter(Boolean).join(" ");
     button.dataset.pitch = String(pitch);
-    button.textContent = name;
     button.setAttribute("aria-label", `Asignar nota ${name}`);
-    dom.noteKeyboard.append(button);
+    appendPianoLabels(button, name);
+    bed.append(button);
   });
+  dom.noteKeyboard.append(bed);
 }
 
 function renderBassSequencer() {
@@ -2101,15 +2142,19 @@ function renderBassEditor() {
 function renderJunoKeyboard() {
   if (!dom.junoKeyboard) return;
   dom.junoKeyboard.replaceChildren();
+  const bed = document.createElement("div");
+  bed.className = "piano-bed juno-piano-bed";
   for (let midi = 60; midi < 84; midi += 1) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `juno-key${BLACK_NOTES.has(midi % 12) ? " is-black" : ""}`;
+    const isBlack = configurePianoKey(button, midi, 60, 2);
+    button.className = `juno-key piano-key${isBlack ? " is-black" : ""}`;
     button.dataset.junoMidi = String(midi);
-    button.textContent = midiToName(midi);
     button.setAttribute("aria-label", `Tocar ${midiToName(midi)} en J-4`);
-    dom.junoKeyboard.append(button);
+    appendPianoLabels(button, midiToName(midi), COMPUTER_JUNO_LABELS.get(midi));
+    bed.append(button);
   }
+  dom.junoKeyboard.append(bed);
 }
 
 function renderJunoVoiceLeds() {
@@ -2239,7 +2284,49 @@ function bindJunoControls() {
       release(button, `key-${button.dataset.junoMidi}`);
     });
   }
+  document.addEventListener("keydown", handleComputerJunoKeyDown);
+  document.addEventListener("keyup", handleComputerJunoKeyUp);
+  window.addEventListener("blur", releaseAllComputerJunoKeys);
   renderJunoControls();
+}
+
+function computerKeyboardTargetIsEditable(target) {
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName) || Boolean(target?.isContentEditable);
+}
+
+function setJunoKeyVisual(midi, held) {
+  dom.junoKeyboard?.querySelector(`[data-juno-midi="${midi}"]`)?.classList.toggle("is-held", held);
+}
+
+function handleComputerJunoKeyDown(event) {
+  const midi = COMPUTER_JUNO_KEYS.get(event.code);
+  if (activeTab !== "juno" || midi === undefined || event.repeat || event.metaKey || event.ctrlKey || event.altKey
+    || computerKeyboardTargetIsEditable(event.target) || computerJunoHeld.has(event.code)) return;
+  event.preventDefault();
+  computerJunoHeld.set(event.code, midi);
+  setJunoKeyVisual(midi, true);
+  engine.pressJunoKey(midi, `computer-${event.code}`).catch(() => {
+    computerJunoHeld.delete(event.code);
+    setJunoKeyVisual(midi, false);
+  });
+}
+
+function releaseComputerJunoKey(code) {
+  const midi = computerJunoHeld.get(code);
+  if (midi === undefined) return;
+  computerJunoHeld.delete(code);
+  setJunoKeyVisual(midi, false);
+  engine.releaseJunoKey(midi, `computer-${code}`);
+}
+
+function handleComputerJunoKeyUp(event) {
+  if (!COMPUTER_JUNO_KEYS.has(event.code)) return;
+  if (computerJunoHeld.has(event.code)) event.preventDefault();
+  releaseComputerJunoKey(event.code);
+}
+
+function releaseAllComputerJunoKeys() {
+  [...computerJunoHeld.keys()].forEach(releaseComputerJunoKey);
 }
 
 function renderPlayhead(step) {
@@ -2379,6 +2466,7 @@ function stopTransport() {
 }
 
 function switchTab(tabName) {
+  if (activeTab === "juno" && tabName !== "juno") releaseAllComputerJunoKeys();
   activeTab = tabName;
   const tabs = [...document.querySelectorAll(".tab-button")];
   tabs.forEach((tab) => {
