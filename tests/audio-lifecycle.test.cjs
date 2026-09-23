@@ -51,12 +51,30 @@ class Param {
 }
 
 function mockContext(sampleRate = 48000) {
-  const ctx = { currentTime: 0, state: "running", sampleRate, nodes: new Set(), sources: new Set(), created: 0, buffers: 0 };
+  const ctx = { currentTime: 0, state: "running", sampleRate, nodes: new Set(), sources: new Set(), recordOperations: false, operations: [], created: 0, buffers: 0 };
+  const snapshot = (node) => ({
+    gain: node?.gain?.value,
+    frequency: node?.frequency?.value,
+    delayTime: node?.delayTime?.value,
+    pan: node?.pan?.value,
+  });
   const make = (kind) => {
-    const node = { kind, connections: [], gain: new Param(), frequency: new Param(350), detune: new Param(0), offset: new Param(0), Q: new Param(),
+    const node = { kind, connections: [], gain: new Param(), frequency: new Param(kind === "oscillator" ? 440 : 350), detune: new Param(0), offset: new Param(0), Q: new Param(),
       delayTime: new Param(0), pan: new Param(0), threshold: new Param(), knee: new Param(),
       ratio: new Param(), attack: new Param(), release: new Param(),
-      connect(target) { this.connections.push(target); },
+      connect(target) {
+        if (ctx.recordOperations) {
+          ctx.operations.push({
+            type: "connect",
+            source: this,
+            target,
+            sourceSnapshot: snapshot(this),
+            targetSnapshot: snapshot(target),
+            targetValue: target instanceof Param ? target.value : undefined,
+          });
+        }
+        this.connections.push(target);
+      },
       disconnect(target) {
         if (target) {
           this.connections = this.connections.filter((connection) => connection !== target);
@@ -65,7 +83,11 @@ function mockContext(sampleRate = 48000) {
         this.connections = [];
         ctx.nodes.delete(this);
       },
-      start(t = 0) { this.startAt = t; ctx.sources.add(this); },
+      start(t = 0) {
+        if (ctx.recordOperations) ctx.operations.push({ type: "start", source: this, sourceSnapshot: snapshot(this) });
+        this.startAt = t;
+        ctx.sources.add(this);
+      },
       stop(t = 0) { this.stopAt = t; },
       getByteTimeDomainData(data) { data.fill(128); },
     };
@@ -306,6 +328,145 @@ test("J-4 is lazy and builds a complete voice only when a key is played", async 
   assert.ok(engine.junoUnit.pitchDepth.connections.includes(voice.saw.detune));
   assert.ok(engine.junoUnit.filterDepth.connections.includes(voice.filterA.frequency));
   assert.ok(engine.junoUnit.pwmDepth.connections.includes(voice.pulseShaper));
+});
+
+test("J-4 initializes shared modulation and chorus values before connect and start", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+  Object.assign(state.juno, {
+    chorusMode: "I+II",
+    lfoRate: 3.17,
+    lfoPitch: 0.37,
+    lfoFilter: 0.63,
+    pwmAmount: 0.81,
+  });
+
+  ctx.recordOperations = true;
+  engine.startJunoVoice(60, 0.01);
+  const unit = engine.junoUnit;
+  const connection = (sourceNode, target) => {
+    const operation = ctx.operations.find((entry) => entry.type === "connect"
+      && entry.source === sourceNode && entry.target === target);
+    assert.ok(operation, `missing ${sourceNode.kind} connection`);
+    return operation;
+  };
+  const start = (sourceNode) => {
+    const operation = ctx.operations.find((entry) => entry.type === "start" && entry.source === sourceNode);
+    assert.ok(operation, `missing ${sourceNode.kind} start`);
+    return operation;
+  };
+
+  const inputToDry = connection(unit.input, unit.dry);
+  const inputToDelayLeft = connection(unit.input, unit.delayLeft);
+  const inputToDelayRight = connection(unit.input, unit.delayRight);
+  const delayLeftToPanner = connection(unit.delayLeft, unit.pannerLeft);
+  const delayRightToPanner = connection(unit.delayRight, unit.pannerRight);
+  const pannerLeftToWet = connection(unit.pannerLeft, unit.wet);
+  const chorusToLeftDepth = connection(unit.chorusLfo, unit.chorusDepthLeft);
+  const chorusToRightDepth = connection(unit.chorusLfo, unit.chorusDepthRight);
+  const leftDepthToDelay = connection(unit.chorusDepthLeft, unit.delayLeft.delayTime);
+  const rightDepthToDelay = connection(unit.chorusDepthRight, unit.delayRight.delayTime);
+  const lfoToPitch = connection(unit.lfo, unit.pitchDepth);
+  const lfoToShape = connection(unit.lfo, unit.filterLfoShape);
+  const shapeToFilterDepth = connection(unit.filterLfoShape, unit.filterDepth);
+  const lfoToPwm = connection(unit.lfo, unit.pwmDepth);
+
+  const expected = {
+    chorusFrequency: 1.12,
+    lfoFrequency: state.juno.lfoRate,
+    chorusDepthLeft: 0.0046,
+    chorusDepthRight: -0.0046,
+    pitchDepth: state.juno.lfoPitch * 38,
+    filterDepth: state.juno.lfoFilter * 2400,
+    pwmDepth: state.juno.pwmAmount * 0.42,
+    dry: 0.72,
+    wet: 0.70,
+    delayLeft: 0.017,
+    delayRight: 0.023,
+    panLeft: -0.82,
+    panRight: 0.82,
+  };
+  assert.deepEqual({
+    chorusFrequency: chorusToLeftDepth.sourceSnapshot.frequency,
+    chorusFrequencyRight: chorusToRightDepth.sourceSnapshot.frequency,
+    chorusFrequencyAtStart: start(unit.chorusLfo).sourceSnapshot.frequency,
+    lfoFrequency: lfoToPitch.sourceSnapshot.frequency,
+    lfoFrequencyAtShape: lfoToShape.sourceSnapshot.frequency,
+    lfoFrequencyAtPwm: lfoToPwm.sourceSnapshot.frequency,
+    lfoFrequencyAtStart: start(unit.lfo).sourceSnapshot.frequency,
+    chorusDepthLeft: chorusToLeftDepth.targetSnapshot.gain,
+    chorusDepthLeftAtDelay: leftDepthToDelay.sourceSnapshot.gain,
+    chorusDepthRight: chorusToRightDepth.targetSnapshot.gain,
+    chorusDepthRightAtDelay: rightDepthToDelay.sourceSnapshot.gain,
+    pitchDepth: lfoToPitch.targetSnapshot.gain,
+    filterDepth: shapeToFilterDepth.targetSnapshot.gain,
+    pwmDepth: lfoToPwm.targetSnapshot.gain,
+    dry: inputToDry.targetSnapshot.gain,
+    wet: pannerLeftToWet.targetSnapshot.gain,
+    delayLeft: inputToDelayLeft.targetSnapshot.delayTime,
+    delayLeftAtModulation: leftDepthToDelay.targetValue,
+    delayRight: inputToDelayRight.targetSnapshot.delayTime,
+    delayRightAtModulation: rightDepthToDelay.targetValue,
+    panLeft: delayLeftToPanner.targetSnapshot.pan,
+    panRight: delayRightToPanner.targetSnapshot.pan,
+  }, {
+    chorusFrequency: expected.chorusFrequency,
+    chorusFrequencyRight: expected.chorusFrequency,
+    chorusFrequencyAtStart: expected.chorusFrequency,
+    lfoFrequency: expected.lfoFrequency,
+    lfoFrequencyAtShape: expected.lfoFrequency,
+    lfoFrequencyAtPwm: expected.lfoFrequency,
+    lfoFrequencyAtStart: expected.lfoFrequency,
+    chorusDepthLeft: expected.chorusDepthLeft,
+    chorusDepthLeftAtDelay: expected.chorusDepthLeft,
+    chorusDepthRight: expected.chorusDepthRight,
+    chorusDepthRightAtDelay: expected.chorusDepthRight,
+    pitchDepth: expected.pitchDepth,
+    filterDepth: expected.filterDepth,
+    pwmDepth: expected.pwmDepth,
+    dry: expected.dry,
+    wet: expected.wet,
+    delayLeft: expected.delayLeft,
+    delayLeftAtModulation: expected.delayLeft,
+    delayRight: expected.delayRight,
+    delayRightAtModulation: expected.delayRight,
+    panLeft: expected.panLeft,
+    panRight: expected.panRight,
+  });
+
+  assert.deepEqual({
+    chorusFrequency: unit.chorusLfo.frequency.value,
+    lfoFrequency: unit.lfo.frequency.value,
+    chorusDepthLeft: unit.chorusDepthLeft.gain.value,
+    chorusDepthRight: unit.chorusDepthRight.gain.value,
+    pitchDepth: unit.pitchDepth.gain.value,
+    filterDepth: unit.filterDepth.gain.value,
+    pwmDepth: unit.pwmDepth.gain.value,
+    dry: unit.dry.gain.value,
+    wet: unit.wet.gain.value,
+    delayLeft: unit.delayLeft.delayTime.value,
+    delayRight: unit.delayRight.delayTime.value,
+    panLeft: unit.pannerLeft.pan.value,
+    panRight: unit.pannerRight.pan.value,
+  }, expected, "shared parameters must retain their direct initial values after construction");
+
+  [
+    ["chorusLfo.frequency", unit.chorusLfo.frequency],
+    ["lfo.frequency", unit.lfo.frequency],
+    ["chorusDepthLeft.gain", unit.chorusDepthLeft.gain],
+    ["chorusDepthRight.gain", unit.chorusDepthRight.gain],
+    ["pitchDepth.gain", unit.pitchDepth.gain],
+    ["filterDepth.gain", unit.filterDepth.gain],
+    ["pwmDepth.gain", unit.pwmDepth.gain],
+    ["dry.gain", unit.dry.gain],
+    ["wet.gain", unit.wet.gain],
+    ["delayLeft.delayTime", unit.delayLeft.delayTime],
+    ["delayRight.delayTime", unit.delayRight.delayTime],
+    ["pannerLeft.pan", unit.pannerLeft.pan],
+    ["pannerRight.pan", unit.pannerRight.pan],
+  ].forEach(([name, param]) => {
+    assert.deepEqual(param.events, [], `${name} must not use setSmooth during construction`);
+  });
 });
 
 test("J-4 keeps filter modulation above the safe floor and removes PWM DC", async () => {

@@ -67,6 +67,26 @@ const BASS_FADE_TIME = 0.008;
 const JUNO_POLYPHONY = 4;
 const JUNO_GAIN_FLOOR = 0.0001;
 const JUNO_FADE_TIME = 0.009;
+const JUNO_CHORUS_SETTINGS = {
+  OFF: { rate: 0.45, depth: 0, wet: 0, dry: 1 },
+  I: { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 },
+  II: { rate: 0.86, depth: 0.0034, wet: 0.61, dry: 0.78 },
+  "I+II": { rate: 1.12, depth: 0.0046, wet: 0.70, dry: 0.72 },
+};
+
+function getJunoUnitSettings(synth) {
+  const chorus = JUNO_CHORUS_SETTINGS[synth.chorusMode] || JUNO_CHORUS_SETTINGS.I;
+  return {
+    chorusRate: chorus.rate,
+    chorusDepth: chorus.depth,
+    dry: chorus.dry,
+    wet: chorus.wet,
+    lfoRate: synth.lfoRate,
+    pitchDepth: synth.lfoPitch * 38,
+    filterDepth: synth.lfoFilter * 2400,
+    pwmDepth: synth.pwmAmount * 0.42,
+  };
+}
 // The two-pole J-4 filter becomes numerically fragile below this point when
 // resonance, PWM and modulation all meet. Keep the musical low end, but do
 // not let control signals drive the AudioParam into negative frequencies.
@@ -658,6 +678,24 @@ class AudioEngine {
     const filterLfoShape = this.ctx.createWaveShaper();
     const filterDepth = this.ctx.createGain();
     const pwmDepth = this.ctx.createGain();
+    const settings = getJunoUnitSettings(state.juno);
+
+    chorusLfo.type = "sine";
+    chorusLfo.frequency.value = settings.chorusRate;
+    chorusDepthLeft.gain.value = settings.chorusDepth;
+    chorusDepthRight.gain.value = -settings.chorusDepth;
+    dry.gain.value = settings.dry;
+    wet.gain.value = settings.wet;
+    lfo.type = "triangle";
+    lfo.frequency.value = settings.lfoRate;
+    pitchDepth.gain.value = settings.pitchDepth;
+    filterLfoShape.curve = this.createJunoUnipolarLfoCurve();
+    filterDepth.gain.value = settings.filterDepth;
+    pwmDepth.gain.value = settings.pwmDepth;
+    delayLeft.delayTime.value = 0.017;
+    delayRight.delayTime.value = 0.023;
+    if (pannerLeft.pan) pannerLeft.pan.value = -0.82;
+    if (pannerRight.pan) pannerRight.pan.value = 0.82;
 
     input.connect(dry);
     dry.connect(this.channels.juno.input);
@@ -676,15 +714,6 @@ class AudioEngine {
     lfo.connect(filterLfoShape);
     filterLfoShape.connect(filterDepth);
     lfo.connect(pwmDepth);
-    if (pannerLeft.pan) pannerLeft.pan.value = -0.82;
-    if (pannerRight.pan) pannerRight.pan.value = 0.82;
-    delayLeft.delayTime.value = 0.017;
-    delayRight.delayTime.value = 0.023;
-    dry.gain.value = 1;
-    wet.gain.value = 0;
-    chorusLfo.type = "sine";
-    lfo.type = "triangle";
-    filterLfoShape.curve = this.createJunoUnipolarLfoCurve();
     chorusLfo.start();
     lfo.start();
 
@@ -694,29 +723,22 @@ class AudioEngine {
       lfo, pitchDepth, filterLfoShape, filterDepth, pwmDepth,
       cleanupTimer: null, sourcesStopped: false,
     };
-    this.updateJunoUnit();
     return this.junoUnit;
   }
 
   updateJunoUnit() {
     const unit = this.junoUnit;
     if (!unit || !this.ctx) return;
-    const synth = state.juno;
-    const chorus = {
-      OFF: { rate: 0.45, depth: 0, wet: 0, dry: 1 },
-      I: { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 },
-      II: { rate: 0.86, depth: 0.0034, wet: 0.61, dry: 0.78 },
-      "I+II": { rate: 1.12, depth: 0.0046, wet: 0.70, dry: 0.72 },
-    }[synth.chorusMode] || { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 };
-    this.setSmooth(unit.chorusLfo.frequency, chorus.rate, 0.04);
-    this.setSmooth(unit.chorusDepthLeft.gain, chorus.depth, 0.04);
-    this.setSmooth(unit.chorusDepthRight.gain, -chorus.depth, 0.04);
-    this.setSmooth(unit.wet.gain, chorus.wet, 0.035);
-    this.setSmooth(unit.dry.gain, chorus.dry, 0.035);
-    this.setSmooth(unit.lfo.frequency, synth.lfoRate, 0.035);
-    this.setSmooth(unit.pitchDepth.gain, synth.lfoPitch * 38, 0.035);
-    this.setSmooth(unit.filterDepth.gain, synth.lfoFilter * 2400, 0.035);
-    this.setSmooth(unit.pwmDepth.gain, synth.pwmAmount * 0.42, 0.035);
+    const settings = getJunoUnitSettings(state.juno);
+    this.setSmooth(unit.chorusLfo.frequency, settings.chorusRate, 0.04);
+    this.setSmooth(unit.chorusDepthLeft.gain, settings.chorusDepth, 0.04);
+    this.setSmooth(unit.chorusDepthRight.gain, -settings.chorusDepth, 0.04);
+    this.setSmooth(unit.wet.gain, settings.wet, 0.035);
+    this.setSmooth(unit.dry.gain, settings.dry, 0.035);
+    this.setSmooth(unit.lfo.frequency, settings.lfoRate, 0.035);
+    this.setSmooth(unit.pitchDepth.gain, settings.pitchDepth, 0.035);
+    this.setSmooth(unit.filterDepth.gain, settings.filterDepth, 0.035);
+    this.setSmooth(unit.pwmDepth.gain, settings.pwmDepth, 0.035);
   }
 
   updateJunoVoices() {
