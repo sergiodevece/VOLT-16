@@ -23,6 +23,9 @@ const FX_SEND_DEFAULTS = {
 };
 const FX_PARAMETER_DEFAULTS = {
   delayMode: "tape",
+  delayTiming: "free",
+  delayDivision: "1/8",
+  delayPingPong: false,
   delayTime: 0.31,
   delayFeedback: 0.38,
   delayTone: 4200,
@@ -34,6 +37,13 @@ const FX_PARAMETER_DEFAULTS = {
   chorusDepth: 0.52,
   flangerRate: 0.18,
   flangerFeedback: 0.32,
+};
+const DELAY_DIVISION_BEATS = {
+  "1/16": 0.25,
+  "1/8T": 1 / 3,
+  "1/8": 0.5,
+  "1/8D": 0.75,
+  "1/4": 1,
 };
 
 const BASS_GAIN_FLOOR = 0.0001;
@@ -169,6 +179,12 @@ function createFxParameterStates() {
 
 function getChannelFxState(channelId = state.selectedFxChannel) {
   return state.fx.channels[channelId];
+}
+
+function getDelaySeconds(fx, bpm = state.bpm) {
+  if (fx.delayTiming !== "sync") return clamp(fx.delayTime, 0.055, 0.9);
+  const beats = DELAY_DIVISION_BEATS[fx.delayDivision] || DELAY_DIVISION_BEATS["1/8"];
+  return clamp(60 / clamp(bpm, 50, 190) * beats, 0.055, 1.2);
 }
 
 function clamp(value, min, max) {
@@ -366,30 +382,52 @@ class AudioEngine {
 
     const send = this.ctx.createGain();
     const delay = this.ctx.createDelay(2);
+    const delayRight = this.ctx.createDelay(2);
     const tone = this.ctx.createBiquadFilter();
+    const toneRight = this.ctx.createBiquadFilter();
     const feedback = this.ctx.createGain();
+    const crossFeedbackLeft = this.ctx.createGain();
+    const crossFeedbackRight = this.ctx.createGain();
     const wet = this.ctx.createGain();
+    const pannerLeft = typeof this.ctx.createStereoPanner === "function" ? this.ctx.createStereoPanner() : this.ctx.createGain();
+    const pannerRight = typeof this.ctx.createStereoPanner === "function" ? this.ctx.createStereoPanner() : this.ctx.createGain();
     const lfo = this.ctx.createOscillator();
     const lfoDepth = this.ctx.createGain();
+    const lfoDepthRight = this.ctx.createGain();
     send.gain.value = 0;
     tone.type = "lowpass";
+    toneRight.type = "lowpass";
     // A resonant filter inside feedback can amplify each repeat even when the
     // feedback knob is below 100%. Keep this loop strictly attenuating.
     tone.Q.value = NON_RESONANT_Q_DB;
+    toneRight.Q.value = NON_RESONANT_Q_DB;
     lfo.type = "sine";
     lfo.frequency.value = 0.21;
     this.channels[channelId].panner.connect(send);
     send.connect(delay);
     delay.connect(tone);
-    tone.connect(wet);
+    tone.connect(pannerLeft);
+    pannerLeft.connect(wet);
+    delayRight.connect(toneRight);
+    toneRight.connect(pannerRight);
+    pannerRight.connect(wet);
     wet.connect(this.masterGain);
     tone.connect(feedback);
     feedback.connect(delay);
+    tone.connect(crossFeedbackLeft);
+    crossFeedbackLeft.connect(delayRight);
+    toneRight.connect(crossFeedbackRight);
+    crossFeedbackRight.connect(delay);
     lfo.connect(lfoDepth);
     lfoDepth.connect(delay.delayTime);
+    lfo.connect(lfoDepthRight);
+    lfoDepthRight.connect(delayRight.delayTime);
     lfo.start();
 
-    const unit = { channelId, send, delay, tone, feedback, wet, lfo, lfoDepth, cleanupTimer: null, lfoStopped: false };
+    const unit = {
+      channelId, send, delay, delayRight, tone, toneRight, feedback, crossFeedbackLeft, crossFeedbackRight,
+      wet, pannerLeft, pannerRight, lfo, lfoDepth, lfoDepthRight, cleanupTimer: null, lfoStopped: false,
+    };
     this.channelDelays.set(channelId, unit);
     this.updateDelay(channelId);
     return unit;
@@ -399,11 +437,27 @@ class AudioEngine {
     const unit = this.channelDelays.get(channelId);
     if (!unit) return;
     const fx = getChannelFxState(channelId);
-    this.setSmooth(unit.delay.delayTime, clamp(fx.delayTime, 0.055, 0.9), 0.035);
-    this.setSmooth(unit.feedback.gain, state.fx.enabled[channelId].delay ? clamp(fx.delayFeedback, 0, 0.82) : 0);
+    const delaySeconds = getDelaySeconds(fx);
+    const feedback = state.fx.enabled[channelId].delay ? clamp(fx.delayFeedback, 0, 0.82) : 0;
+    const pingPong = Boolean(fx.delayPingPong);
+    this.setSmooth(unit.delay.delayTime, delaySeconds, 0.035);
+    this.setSmooth(unit.delayRight.delayTime, delaySeconds, 0.035);
+    this.setSmooth(unit.feedback.gain, pingPong ? 0 : feedback);
+    this.setSmooth(unit.crossFeedbackLeft.gain, pingPong ? feedback : 0);
+    this.setSmooth(unit.crossFeedbackRight.gain, pingPong ? feedback : 0);
     this.setSmooth(unit.tone.frequency, fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone);
+    this.setSmooth(unit.toneRight.frequency, fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone);
     this.setSmooth(unit.lfoDepth.gain, fx.delayMode === "tape" ? 0.0018 : 0);
+    this.setSmooth(unit.lfoDepthRight.gain, fx.delayMode === "tape" ? 0.0018 : 0);
+    if (unit.pannerLeft.pan) this.setSmooth(unit.pannerLeft.pan, pingPong ? -1 : 0, 0.035);
+    if (unit.pannerRight.pan) this.setSmooth(unit.pannerRight.pan, 1, 0.035);
     this.setSmooth(unit.wet.gain, 0.72);
+  }
+
+  updateSyncedDelays() {
+    this.channelDelays.forEach((unit, channelId) => {
+      if (getChannelFxState(channelId).delayTiming === "sync") this.updateDelay(channelId);
+    });
   }
 
   scheduleDelayDisposal(channelId) {
@@ -412,7 +466,9 @@ class AudioEngine {
     const fx = getChannelFxState(channelId);
     this.setSmooth(unit.send.gain, 0);
     this.setSmooth(unit.feedback.gain, 0, 0.035);
-    const tailSeconds = clamp(fx.delayTime * 2 + 0.12, 0.24, 2);
+    this.setSmooth(unit.crossFeedbackLeft.gain, 0, 0.035);
+    this.setSmooth(unit.crossFeedbackRight.gain, 0, 0.035);
+    const tailSeconds = clamp(getDelaySeconds(fx) * (fx.delayPingPong ? 3 : 2) + 0.12, 0.24, 4);
     unit.cleanupTimer = window.setTimeout(() => {
       unit.cleanupTimer = null;
       if (!state.fx.enabled[channelId].delay) this.disposeChannelDelay(channelId);
@@ -429,12 +485,18 @@ class AudioEngine {
     unit.send.gain.setValueAtTime(0, now);
     unit.feedback.gain.cancelScheduledValues(now);
     unit.feedback.gain.setValueAtTime(0, now);
+    unit.crossFeedbackLeft.gain.cancelScheduledValues(now);
+    unit.crossFeedbackLeft.gain.setValueAtTime(0, now);
+    unit.crossFeedbackRight.gain.cancelScheduledValues(now);
+    unit.crossFeedbackRight.gain.setValueAtTime(0, now);
     if (!unit.lfoStopped) {
       unit.lfo.stop(now);
       unit.lfoStopped = true;
     }
     this.channels[channelId].panner.disconnect(unit.send);
-    [unit.send, unit.delay, unit.tone, unit.feedback, unit.wet, unit.lfo, unit.lfoDepth].forEach((node) => node.disconnect());
+    [unit.send, unit.delay, unit.delayRight, unit.tone, unit.toneRight, unit.feedback, unit.crossFeedbackLeft,
+      unit.crossFeedbackRight, unit.wet, unit.pannerLeft, unit.pannerRight, unit.lfo, unit.lfoDepth,
+      unit.lfoDepthRight].forEach((node) => node.disconnect());
     this.channelDelays.delete(channelId);
   }
 
@@ -1597,6 +1659,8 @@ function showToast(message) {
 function setBpm(value) {
   state.bpm = clamp(Math.round(Number(value) || state.bpm), 50, 190);
   dom.bpm.value = String(state.bpm);
+  engine.updateSyncedDelays();
+  renderFxParameters();
 }
 
 function bindSequencers() {
@@ -1788,6 +1852,24 @@ function renderFxParameters() {
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-checked", String(active));
   });
+  document.querySelectorAll("[data-delay-timing]").forEach((button) => {
+    const active = button.dataset.delayTiming === fx.delayTiming;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-delay-division]").forEach((button) => {
+    const active = button.dataset.delayDivision === fx.delayDivision;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+    button.disabled = fx.delayTiming !== "sync";
+  });
+  const pingPongButton = document.querySelector("[data-delay-ping-pong]");
+  if (pingPongButton) {
+    pingPongButton.classList.toggle("is-active", fx.delayPingPong);
+    pingPongButton.setAttribute("aria-pressed", String(fx.delayPingPong));
+  }
+  const divisionPanel = document.querySelector("[data-delay-division-panel]");
+  if (divisionPanel) divisionPanel.classList.toggle("is-disabled", fx.delayTiming !== "sync");
   document.querySelectorAll("[data-reverb-mode]").forEach((button) => {
     const active = button.dataset.reverbMode === fx.reverbMode;
     button.classList.toggle("is-active", active);
@@ -1802,7 +1884,13 @@ function renderFxParameters() {
     const name = control.dataset.fxControl;
     const raw = fxControlRawValue(name, fx[name]);
     input.value = String(raw);
-    control.querySelector("output").textContent = fxOutput(name, raw);
+    control.querySelector("output").textContent = name === "delayTime" && fx.delayTiming === "sync"
+      ? `${fx.delayDivision} · ${Math.round(getDelaySeconds(fx) * 1000)} ms`
+      : fxOutput(name, raw);
+    if (name === "delayTime") {
+      input.disabled = fx.delayTiming === "sync";
+      control.classList?.toggle("is-disabled", input.disabled);
+    }
     rangeFill(input);
   });
 }
@@ -1878,6 +1966,32 @@ function bindEffects() {
       engine.updateEffect("delay");
     });
   });
+
+  document.querySelectorAll("[data-delay-timing]").forEach((button) => {
+    button.addEventListener("click", () => {
+      getChannelFxState().delayTiming = button.dataset.delayTiming;
+      renderFxParameters();
+      engine.updateEffect("delay");
+    });
+  });
+
+  document.querySelectorAll("[data-delay-division]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (getChannelFxState().delayTiming !== "sync") return;
+      getChannelFxState().delayDivision = button.dataset.delayDivision;
+      renderFxParameters();
+      engine.updateEffect("delay");
+    });
+  });
+
+  const pingPongButton = document.querySelector("[data-delay-ping-pong]");
+  if (pingPongButton) {
+    pingPongButton.addEventListener("click", () => {
+      getChannelFxState().delayPingPong = !getChannelFxState().delayPingPong;
+      renderFxParameters();
+      engine.updateEffect("delay");
+    });
+  }
 
   document.querySelectorAll("[data-reverb-mode]").forEach((button) => {
     button.addEventListener("click", () => {

@@ -101,7 +101,8 @@ function mockContext(sampleRate = 48000) {
   return ctx;
 }
 
-function setup({ fxControls = [], delayModeButtons = [], reverbModeButtons = [] } = {}) {
+function setup({ fxControls = [], delayModeButtons = [], delayTimingButtons = [], delayDivisionButtons = [],
+  pingPongButton = null, divisionPanel = null, reverbModeButtons = [] } = {}) {
   const ctx = mockContext();
   const callbacks = new Map();
   let nextCallbackId = 0;
@@ -123,10 +124,16 @@ function setup({ fxControls = [], delayModeButtons = [], reverbModeButtons = [] 
     querySelectorAll: (selector) => {
       if (selector === "[data-fx-control]") return fxControls;
       if (selector === "[data-delay-mode]") return delayModeButtons;
+      if (selector === "[data-delay-timing]") return delayTimingButtons;
+      if (selector === "[data-delay-division]") return delayDivisionButtons;
       if (selector === "[data-reverb-mode]") return reverbModeButtons;
       return [];
     },
-    querySelector: () => element(),
+    querySelector: (selector) => {
+      if (selector === "[data-delay-ping-pong]") return pingPongButton || element();
+      if (selector === "[data-delay-division-panel]") return divisionPanel || element();
+      return element();
+    },
     getElementById: (id) => id === "reverbDisplay" ? reverbDisplay : element(),
   };
   const window = {
@@ -147,7 +154,7 @@ function setup({ fxControls = [], delayModeButtons = [], reverbModeButtons = [] 
     performance: { now: () => 0 },
   });
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
-    globalThis.api = { state, engine, CHANNELS, FX_NAMES, bindEffects, renderFxChannel, stopTransport, handlePageHide };
+    globalThis.api = { state, engine, CHANNELS, FX_NAMES, bindEffects, renderFxChannel, setBpm, stopTransport, handlePageHide };
   `, context);
   return {
     ...context.api,
@@ -310,6 +317,52 @@ test("snare and bass use independent delay processors and parameter automation",
   assert.equal(bass.lfoDepth.gain.value, 0.0018);
 });
 
+test("tempo sync follows BPM and divisions without changing free delays", async () => {
+  const { state, engine, setBpm } = setup();
+  await engine.init();
+  Object.assign(state.fx.channels.snare, { delayTiming: "sync", delayDivision: "1/8", delayTime: 0.18 });
+  Object.assign(state.fx.channels.bass, { delayTiming: "free", delayTime: 0.57 });
+  state.fx.enabled.snare.delay = true;
+  state.fx.enabled.bass.delay = true;
+  engine.updateEffectSend("snare", "delay");
+  engine.updateEffectSend("bass", "delay");
+
+  setBpm(120);
+  assert.equal(engine.channelDelays.get("snare").delay.delayTime.value, 0.25);
+  assert.equal(engine.channelDelays.get("snare").delayRight.delayTime.value, 0.25);
+  assert.equal(engine.channelDelays.get("bass").delay.delayTime.value, 0.57);
+
+  state.fx.channels.snare.delayDivision = "1/8D";
+  engine.updateEffect("delay", "snare");
+  assert.equal(engine.channelDelays.get("snare").delay.delayTime.value, 0.375);
+  setBpm(90);
+  assert.ok(Math.abs(engine.channelDelays.get("snare").delay.delayTime.value - 0.5) < 1e-9);
+  assert.equal(engine.channelDelays.get("bass").delay.delayTime.value, 0.57);
+});
+
+test("ping-pong crossfades between mono and alternating stereo feedback per channel", async () => {
+  const { state, engine } = setup();
+  await engine.init();
+  Object.assign(state.fx.channels.snare, { delayPingPong: true, delayFeedback: 0.61 });
+  state.fx.enabled.snare.delay = true;
+  engine.updateEffectSend("snare", "delay");
+  const unit = engine.channelDelays.get("snare");
+
+  assert.equal(unit.feedback.gain.value, 0);
+  assert.equal(unit.crossFeedbackLeft.gain.value, 0.61);
+  assert.equal(unit.crossFeedbackRight.gain.value, 0.61);
+  assert.equal(unit.pannerLeft.pan.value, -1);
+  assert.equal(unit.pannerRight.pan.value, 1);
+  assert.equal(state.fx.channels.bass.delayPingPong, false);
+
+  state.fx.channels.snare.delayPingPong = false;
+  engine.updateEffect("delay", "snare");
+  assert.equal(unit.feedback.gain.value, 0.61);
+  assert.equal(unit.crossFeedbackLeft.gain.value, 0);
+  assert.equal(unit.crossFeedbackRight.gain.value, 0);
+  assert.equal(unit.pannerLeft.pan.value, 0);
+});
+
 test("FX controls edit and reload the selected channel's parameter values", () => {
   const delayTime = fxControl("delayTime", 310, 55, 900);
   const reverbDamping = fxControl("reverbDamping", 6500, 1000, 14000);
@@ -360,7 +413,47 @@ test("FX controls edit and reload the selected channel's parameter values", () =
   assert.equal(state.fx.channels.snare.reverbMode, "hall");
 });
 
-test("delay instances are lazy and add seven active nodes per enabled channel", async () => {
+test("sync division and ping-pong controls retain independent values per selected channel", () => {
+  const free = prepareModeButton("delayTiming", "free");
+  const sync = prepareModeButton("delayTiming", "sync");
+  const eighth = prepareModeButton("delayDivision", "1/8");
+  const dotted = prepareModeButton("delayDivision", "1/8D");
+  const pingPong = prepareModeButton("delayPingPong", "toggle");
+  const { state, bindEffects, renderFxChannel } = setup({
+    delayTimingButtons: [free, sync],
+    delayDivisionButtons: [eighth, dotted],
+    pingPongButton: pingPong,
+  });
+  bindEffects();
+
+  state.selectedFxChannel = "snare";
+  renderFxChannel();
+  sync.click();
+  dotted.click();
+  pingPong.click();
+  assert.equal(state.fx.channels.snare.delayTiming, "sync");
+  assert.equal(state.fx.channels.snare.delayDivision, "1/8D");
+  assert.equal(state.fx.channels.snare.delayPingPong, true);
+  assert.equal(state.fx.channels.bass.delayTiming, "free");
+  assert.equal(state.fx.channels.bass.delayDivision, "1/8");
+  assert.equal(state.fx.channels.bass.delayPingPong, false);
+
+  state.selectedFxChannel = "bass";
+  renderFxChannel();
+  assert.equal(free.active, true);
+  assert.equal(sync.active, false);
+  assert.equal(eighth.active, true);
+  assert.equal(dotted.active, false);
+  assert.equal(pingPong.active, false);
+
+  state.selectedFxChannel = "snare";
+  renderFxChannel();
+  assert.equal(sync.active, true);
+  assert.equal(dotted.active, true);
+  assert.equal(pingPong.active, true);
+});
+
+test("delay instances are lazy and add fourteen active nodes per enabled channel", async () => {
   const { state, engine, ctx, CHANNELS } = setup();
   await engine.init();
 
@@ -373,14 +466,14 @@ test("delay instances are lazy and add seven active nodes per enabled channel", 
   state.fx.enabled.bass.delay = true;
   engine.updateEffectSend("snare", "delay");
   engine.updateEffectSend("bass", "delay");
-  assert.equal(ctx.nodes.length, 89);
+  assert.equal(ctx.nodes.length, 103);
   assert.equal(engine.channelDelays.size, 2);
 
   CHANNELS.map(({ id }) => id).filter((id) => !["snare", "bass"].includes(id)).forEach((id) => {
     state.fx.enabled[id].delay = true;
     engine.updateEffectSend(id, "delay");
   });
-  assert.equal(ctx.nodes.length, 117);
+  assert.equal(ctx.nodes.length, 159);
   assert.equal(engine.channelDelays.size, 6);
 });
 
@@ -743,7 +836,7 @@ test("STOP and pagehide dispose every lazy FX family without orphaned routes or 
   };
 
   let units = enableAllForSnare();
-  assert.equal(api.activeNodeCount(), 109);
+  assert.equal(api.activeNodeCount(), 116);
   api.stopTransport();
   assertDisposed(units);
 

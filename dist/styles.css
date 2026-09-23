@@ -1109,6 +1109,38 @@ h2 {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.mode-selector.delay-timing-selector {
+  grid-template-columns: repeat(3, 1fr);
+  padding-top: 0;
+}
+
+.delay-divisions {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  padding: 0 12px 12px;
+  border-bottom: 1px solid rgba(66, 57, 45, 0.45);
+  transition: opacity 140ms ease;
+}
+
+.delay-divisions.is-disabled {
+  opacity: 0.42;
+}
+
+.delay-divisions .mode-key {
+  min-width: 0;
+  padding-inline: 4px;
+  font-size: 0.66rem;
+}
+
+.fx-slider.is-disabled {
+  opacity: 0.55;
+}
+
+.fx-slider.is-disabled input {
+  cursor: not-allowed;
+}
+
 .mode-key {
   color: #eee0bb;
 }

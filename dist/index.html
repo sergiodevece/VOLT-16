@@ -269,6 +269,18 @@
                 <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-delay-mode="tape">TAPE</button>
                 <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-mode="digital">DIGITAL</button>
               </div>
+              <div class="mode-selector delay-timing-selector" role="radiogroup" aria-label="Sincronización del delay">
+                <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-delay-timing="free">FREE</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-timing="sync">SYNC</button>
+                <button class="mode-key ping-pong-key" type="button" aria-pressed="false" data-delay-ping-pong>PING-PONG</button>
+              </div>
+              <div class="delay-divisions is-disabled" role="radiogroup" aria-label="División rítmica del delay" data-delay-division-panel>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-division="1/16">1/16</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-division="1/8T">1/8T</button>
+                <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-delay-division="1/8">1/8</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-division="1/8D">1/8D</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-delay-division="1/4">1/4</button>
+              </div>
               <div class="effect-controls">
                 <label class="fx-slider" data-fx-control="delayTime"><span>TIME <output>310 ms</output></span><input type="range" min="55" max="900" value="310" step="5" /></label>
                 <label class="fx-slider" data-fx-control="delayFeedback"><span>FEEDBACK <output>38%</output></span><input type="range" min="0" max="82" value="38" /></label>
@@ -333,7 +345,7 @@
               </div>
             </section>
           </div>
-          <p class="micro-help">Selecciona un canal y ajusta sus interruptores ON y niveles SEND. TIME, FEEDBACK, modos, RATE y DEPTH son ajustes compartidos del rack. En directo, tres cucharadas de hall siguen siendo tres cucharadas de hall.</p>
+          <p class="micro-help">Selecciona un canal y ajusta sus propios parámetros. El delay puede trabajar libre o sincronizado al BPM, con divisiones rítmicas y ping-pong estéreo independiente por canal.</p>
         </section>
 
         <section id="panel-mixer" class="tab-panel" role="tabpanel" aria-labelledby="tab-mixer" hidden>
@@ -495,12 +507,12 @@
       </main>
 
       <footer>
-        <span>VOLT/16 · AUDIO r8</span>
+        <span>VOLT/16 · AUDIO r9</span>
         <span>16 STEPS · 4/4 · MONO BASS</span>
       </footer>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js?v=8"></script>
+    <script src="./app.js?v=9"></script>
   </body>
 </html>

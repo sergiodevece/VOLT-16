@@ -19,7 +19,7 @@ Durante la reproducción, editar batería o bajo modifica el patrón sin dispara
 - Bajo: oscilador, suboscilador, filtro, envolvente, acento y slide.
 - Tempo, tap tempo y swing.
 - Por canal: compresor de inspiración óptica con gain y peak reduction; EQ con pasa altos, pasa bajos y dos shelving.
-- Delay de cinta/digital, reverb room/plate/hall, phaser, chorus y flanger.
+- Delay de cinta/digital con tiempo libre o sincronizado al BPM, cinco divisiones rítmicas y ping-pong estéreo; reverb room/plate/hall, phaser, chorus y flanger.
 - Envíos, activación y parámetros de cada efecto independientes para los seis canales.
 
 El sonido sale por la salida de audio que tenga seleccionada el dispositivo. Los patrones y ajustes se reinician al recargar la página.
@@ -57,7 +57,10 @@ node --test tests/*.test.cjs
 
 Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM y un escenario con los cinco efectos activos en los seis canales, cambios repetidos, desactivación/reactivación y PLAY/STOP. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Arquitectura de audio r8
+## Arquitectura de audio r9
+
+- Cada delay conserva por canal su modo FREE/SYNC, división rítmica y ping-pong. Los delays sincronizados siguen los cambios de BPM mediante rampas suaves; los delays libres mantienen su tiempo en milisegundos.
+- El ping-pong alterna dos líneas de retardo independientes entre izquierda y derecha. Cambiarlo durante la reproducción cruza las rutas de feedback sin reconectar nodos ni producir saltos bruscos.
 
 - Cada canal conserva su propio estado, envío y ruta FX. Cambiar los parámetros de un canal no modifica los nodos de los demás.
 - Delay, chorus, phaser y flanger se crean bajo demanda y se desconectan después de sus colas. Sus LFO se detienen durante el cleanup.
@@ -67,4 +70,4 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - El filtro del delay usa una Q sin resonancia para que el feedback máximo permitido no amplifique sucesivamente algunas frecuencias. En los filtros lowpass/highpass de Web Audio, Q se expresa en dB: [especificación de los filtros](https://www.w3.org/TR/webaudio/#filters-characteristics).
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
-Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r8**. Prueba 10–15 minutos editando patrones, usando parámetros FX distintos en varios canales y haciendo PLAY/STOP repetidos. Si hay crujidos, anota dispositivo, navegador, efecto y ajuste que los provoca, y si desaparecen al recargar.
+Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r9**. Prueba delays FREE y SYNC en varios canales, cambia BPM y divisiones durante PLAY, alterna ping-pong y haz PLAY/STOP repetidos. Si hay crujidos, anota dispositivo, navegador, efecto y ajuste que los provoca, y si desaparecen al recargar.
