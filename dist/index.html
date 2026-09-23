@@ -237,10 +237,12 @@
                   <span>AUTO</span><span>OFF</span>
                 </button>
                 <div class="auto-cutoff-divisions" role="radiogroup" aria-label="División rítmica del Auto Cutoff">
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/1">1/1</button>
+                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-auto-cutoff-division="1/2">1/2</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/2T">1/2T</button>
                   <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/4">1/4</button>
-                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/8T">1/8T</button>
-                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-auto-cutoff-division="1/8">1/8</button>
-                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/16">1/16</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/4T">1/4T</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/8">1/8</button>
                 </div>
                 <label class="auto-cutoff-amount">
                   <span>AMOUNT</span>
@@ -525,12 +527,12 @@
       </main>
 
       <footer>
-        <span>VOLT/16 · AUDIO r10</span>
+        <span>VOLT/16 · AUDIO r11</span>
         <span>16 STEPS · 4/4 · MONO BASS</span>
       </footer>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js?v=10"></script>
+    <script src="./app.js?v=11"></script>
   </body>
 </html>

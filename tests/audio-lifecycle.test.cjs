@@ -53,7 +53,7 @@ class Param {
 function mockContext(sampleRate = 48000) {
   const ctx = { currentTime: 0, state: "running", sampleRate, nodes: new Set(), sources: new Set(), created: 0, buffers: 0 };
   const make = (kind) => {
-    const node = { kind, connections: [], gain: new Param(), frequency: new Param(350), Q: new Param(),
+    const node = { kind, connections: [], gain: new Param(), frequency: new Param(350), offset: new Param(0), Q: new Param(),
       delayTime: new Param(0), pan: new Param(0), threshold: new Param(), knee: new Param(),
       ratio: new Param(), attack: new Param(), release: new Param(),
       connect(target) { this.connections.push(target); },
@@ -72,7 +72,7 @@ function mockContext(sampleRate = 48000) {
     ctx.nodes.add(node); ctx.created += 1;
     return node;
   };
-  for (const [method, kind] of Object.entries({ createGain: "gain", createOscillator: "oscillator",
+  for (const [method, kind] of Object.entries({ createGain: "gain", createOscillator: "oscillator", createConstantSource: "constantSource",
     createBufferSource: "bufferSource", createBiquadFilter: "filter", createWaveShaper: "shaper",
     createConvolver: "convolver", createDelay: "delay", createStereoPanner: "panner",
     createDynamicsCompressor: "compressor", createAnalyser: "analyser" })) ctx[method] = () => make(kind);
@@ -155,34 +155,42 @@ test("Auto Cutoff is lazy, tempo-synced, shared by live bass voices, and fully d
   engine.updateAutoCutoff(ctx.currentTime + 0.055);
   const unit = engine.autoCutoff;
   assert.ok(unit, "enabling during PLAY must create the shared LFO");
-  assert.equal(unit.lfo.type, "triangle");
+  assert.equal(unit.lfo.type, "sine");
   assert.equal(unit.lfo.startAt, 0.055, "the first cycle must align with transport start");
-  assert.equal(unit.lfo.frequency.value, 112 / 60 * 2);
-  assert.equal(ctx.nodes.size, baseline + 2, "one oscillator and one depth gain are enough");
+  assert.equal(unit.offset.startAt, 0.055);
+  assert.equal(unit.lfo.frequency.value, 112 / 60 * 0.5);
+  assert.equal(ctx.nodes.size, baseline + 3, "one oscillator, one depth gain, and one DC offset are enough");
+  assert.equal(unit.depth.gain.events[0].value, 0, "modulation must enter from silence without a cutoff jump");
+  assert.equal(unit.offset.offset.events[0].value, 0, "unipolar offset must also enter from zero");
 
   engine.scheduleBass({ active: true, midi: 24 }, 0.055, 0.2);
   assert.equal(unit.filters.size, 2, "both poles of the bass filter receive the same modulation");
   assert.equal(unit.depth.connections.length, 2);
+  assert.equal(unit.offset.connections.length, 2);
   engine.updateAutoCutoff();
   assert.equal(unit.depth.connections.length, 2, "updating a live voice must not duplicate modulation routes");
+  assert.equal(unit.offset.connections.length, 2);
   const created = ctx.created;
   state.synth.autoCutoffAmount = 0.72;
   state.bpm = 120;
   for (let index = 0; index < 100; index += 1) engine.updateAutoCutoff();
   assert.equal(ctx.created, created, "editing rate or amount must not allocate new nodes");
-  assert.equal(unit.lfo.frequency.events.at(-1).value, 4);
+  assert.equal(unit.lfo.frequency.events.at(-1).value, 1);
   assert.equal(unit.depth.gain.events.at(-1).value, 2160);
+  assert.equal(unit.offset.offset.events.at(-1).value, 2160);
   assert.equal(state.synth.cutoff, 900, "the LFO must add modulation without rewriting manual cutoff");
 
   ctx.finishUntil(2);
   assert.equal(unit.filters.size, 0, "ended voices must detach their AudioParam routes");
   assert.equal(unit.depth.connections.length, 0);
+  assert.equal(unit.offset.connections.length, 0);
   assert.equal(engine.autoCutoff, unit, "transport phase remains alive between bass notes");
 
   engine.stopVoices();
   assert.equal(engine.autoCutoff, null);
   assert.equal(unit.lfo.stopAt, ctx.currentTime);
-  assert.ok(unit.lfo.connections.length === 0 && unit.depth.connections.length === 0);
+  assert.equal(unit.offset.stopAt, ctx.currentTime);
+  assert.ok(unit.lfo.connections.length === 0 && unit.depth.connections.length === 0 && unit.offset.connections.length === 0);
   assert.equal([...callbacks.values()].length, 0, "STOP leaves no Auto Cutoff cleanup timer");
 });
 
@@ -211,7 +219,7 @@ test("Auto Cutoff disable fades, can reuse its pending LFO, and then cleans it",
   const cleanup = callbacks.get(first.cleanupTimer);
   cleanup();
   assert.equal(engine.autoCutoff, null);
-  assert.equal(first.lfoStopped, true);
+  assert.equal(first.sourcesStopped, true);
 });
 
 test("maximum six-channel FX load survives parameter churn, reuse, PLAY/STOP, and final cleanup", async () => {

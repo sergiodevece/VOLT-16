@@ -46,10 +46,12 @@ const DELAY_DIVISION_BEATS = {
   "1/4": 1,
 };
 const AUTO_CUTOFF_DIVISION_CYCLES = {
+  "1/1": 0.25,
+  "1/2": 0.5,
+  "1/2T": 0.75,
   "1/4": 1,
-  "1/8T": 3,
+  "1/4T": 1.5,
   "1/8": 2,
-  "1/16": 4,
 };
 
 const BASS_GAIN_FLOOR = 0.0001;
@@ -140,7 +142,7 @@ const state = {
     sub: 0.32,
     drive: 0.18,
     autoCutoffEnabled: false,
-    autoCutoffDivision: "1/8",
+    autoCutoffDivision: "1/2",
     autoCutoffAmount: 0.45,
   },
   fx: {
@@ -351,8 +353,14 @@ class AudioEngine {
   }
 
   autoCutoffFrequency() {
-    const cycles = AUTO_CUTOFF_DIVISION_CYCLES[state.synth.autoCutoffDivision] || 2;
+    const cycles = AUTO_CUTOFF_DIVISION_CYCLES[state.synth.autoCutoffDivision] || 0.5;
     return state.bpm / 60 * cycles;
+  }
+
+  autoCutoffRange() {
+    const synth = state.synth;
+    const headroom = Math.max(0, 18000 - synth.cutoff - synth.envAmount * 1.28);
+    return Math.min(6000, headroom) * synth.autoCutoffAmount;
   }
 
   createAutoCutoff(startTime = null) {
@@ -360,18 +368,27 @@ class AudioEngine {
     if (this.autoCutoff) {
       if (this.autoCutoff.cleanupTimer !== null) window.clearTimeout(this.autoCutoff.cleanupTimer);
       this.autoCutoff.cleanupTimer = null;
+      const halfRange = this.autoCutoffRange() / 2;
       this.setSmooth(this.autoCutoff.lfo.frequency, this.autoCutoffFrequency(), 0.035);
-      this.setSmooth(this.autoCutoff.depth.gain, state.synth.autoCutoffAmount * 3000, 0.025);
+      this.setSmooth(this.autoCutoff.depth.gain, halfRange, 0.035);
+      this.setSmooth(this.autoCutoff.offset.offset, halfRange, 0.035);
       return this.autoCutoff;
     }
     const lfo = this.ctx.createOscillator();
     const depth = this.ctx.createGain();
-    lfo.type = "triangle";
+    const offset = this.ctx.createConstantSource();
+    const halfRange = this.autoCutoffRange() / 2;
+    lfo.type = "sine";
     lfo.frequency.value = this.autoCutoffFrequency();
-    depth.gain.value = state.synth.autoCutoffAmount * 3000;
+    depth.gain.value = 0;
+    offset.offset.value = 0;
     lfo.connect(depth);
-    lfo.start(Math.max(this.ctx.currentTime, startTime ?? this.ctx.currentTime));
-    this.autoCutoff = { lfo, depth, filters: new Set(), cleanupTimer: null, lfoStopped: false };
+    const phaseStart = Math.max(this.ctx.currentTime, startTime ?? this.ctx.currentTime);
+    lfo.start(phaseStart);
+    offset.start(phaseStart);
+    this.autoCutoff = { lfo, depth, offset, filters: new Set(), cleanupTimer: null, sourcesStopped: false };
+    this.setSmooth(depth.gain, halfRange, 0.035);
+    this.setSmooth(offset.offset, halfRange, 0.035);
     return this.autoCutoff;
   }
 
@@ -385,8 +402,10 @@ class AudioEngine {
     if (!unit) return;
     if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
     unit.cleanupTimer = null;
+    const halfRange = this.autoCutoffRange() / 2;
     this.setSmooth(unit.lfo.frequency, this.autoCutoffFrequency(), 0.035);
-    this.setSmooth(unit.depth.gain, state.synth.autoCutoffAmount * 3000, 0.025);
+    this.setSmooth(unit.depth.gain, halfRange, 0.035);
+    this.setSmooth(unit.offset.offset, halfRange, 0.035);
     this.bassVoices.forEach((voice) => this.attachAutoCutoff(voice.filters));
   }
 
@@ -396,6 +415,7 @@ class AudioEngine {
     filters.forEach((filter) => {
       if (unit.filters.has(filter)) return;
       unit.depth.connect(filter.frequency);
+      unit.offset.connect(filter.frequency);
       unit.filters.add(filter);
     });
   }
@@ -405,6 +425,7 @@ class AudioEngine {
     if (!unit) return;
     filters.forEach((filter) => {
       try { unit.depth.disconnect(filter.frequency); } catch { /* already detached */ }
+      try { unit.offset.disconnect(filter.frequency); } catch { /* already detached */ }
       unit.filters.delete(filter);
     });
     if (!state.playing && unit.filters.size === 0) this.scheduleAutoCutoffDisposal();
@@ -414,6 +435,7 @@ class AudioEngine {
     const unit = this.autoCutoff;
     if (!unit || unit.cleanupTimer !== null) return;
     this.setSmooth(unit.depth.gain, 0, 0.018);
+    this.setSmooth(unit.offset.offset, 0, 0.018);
     unit.cleanupTimer = window.setTimeout(() => {
       unit.cleanupTimer = null;
       if (!state.synth.autoCutoffEnabled || (!state.playing && unit.filters.size === 0)) this.disposeAutoCutoff();
@@ -426,14 +448,17 @@ class AudioEngine {
     if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
     unit.filters.forEach((filter) => {
       try { unit.depth.disconnect(filter.frequency); } catch { /* already detached */ }
+      try { unit.offset.disconnect(filter.frequency); } catch { /* already detached */ }
     });
     unit.filters.clear();
-    if (!unit.lfoStopped) {
+    if (!unit.sourcesStopped) {
       unit.lfo.stop(this.ctx?.currentTime || 0);
-      unit.lfoStopped = true;
+      unit.offset.stop(this.ctx?.currentTime || 0);
+      unit.sourcesStopped = true;
     }
     unit.lfo.disconnect();
     unit.depth.disconnect();
+    unit.offset.disconnect();
     this.autoCutoff = null;
   }
 
@@ -1916,6 +1941,7 @@ function bindSynthControls() {
       const percent = (raw - Number(input.min)) / (Number(input.max) - Number(input.min));
       control.style.setProperty("--dial-angle", `${-125 + percent * 250}deg`);
       rangeFill(input);
+      if (["cutoff", "envAmount"].includes(name)) engine.updateAutoCutoff();
     };
     input.addEventListener("input", update);
     update();
