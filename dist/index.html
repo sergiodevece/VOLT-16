@@ -163,6 +163,57 @@
             <p class="micro-help">Mantén hasta cuatro notas simultáneas. En el Mac: octava grave Z–M y octava aguda Q–U; las teclas negras usan S, D, G, H, J y 2, 3, 5, 6, 7.</p>
           </section>
 
+          <section class="juno-arp" aria-labelledby="junoArpTitle">
+            <div class="juno-arp-heading">
+              <div>
+                <p class="eyebrow">TEMPO SYNCHRONIZED</p>
+                <h2 id="junoArpTitle">ARP-5</h2>
+              </div>
+              <output id="junoArpStatus">BYPASS</output>
+            </div>
+            <div class="juno-arp-grid">
+              <div class="juno-arp-block arp-switch-block">
+                <span class="juno-arp-label">ENGINE</span>
+                <div class="juno-switch-row">
+                  <button class="juno-switch" type="button" data-juno-arp-toggle="enabled" aria-pressed="false">ARP OFF</button>
+                  <button class="juno-switch" type="button" data-juno-arp-toggle="hold" aria-pressed="false">HOLD</button>
+                </div>
+              </div>
+              <div class="juno-arp-block arp-mode-block">
+                <span class="juno-arp-label">MODE</span>
+                <div class="arp-button-row arp-mode-row" role="radiogroup" aria-label="Modo del arpegiador">
+                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-juno-arp-mode="UP">UP</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-mode="DOWN">DOWN</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-mode="UP/DOWN">UP/DOWN</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-mode="RANDOM">RANDOM</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-mode="ORDER">ORDER</button>
+                </div>
+              </div>
+              <div class="juno-arp-block arp-rate-block">
+                <span class="juno-arp-label">RATE</span>
+                <div class="arp-button-row" role="radiogroup" aria-label="División del arpegiador">
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-division="1/4">1/4</button>
+                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-juno-arp-division="1/8">1/8</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-division="1/8T">1/8T</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-division="1/16">1/16</button>
+                </div>
+              </div>
+              <div class="juno-arp-block arp-octave-block">
+                <span class="juno-arp-label">RANGE</span>
+                <div class="arp-button-row" role="radiogroup" aria-label="Octavas del arpegiador">
+                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-juno-arp-octaves="1">1 OCT</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-octaves="2">2 OCT</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-arp-octaves="3">3 OCT</button>
+                </div>
+              </div>
+              <label class="juno-arp-block juno-slider arp-gate-block" data-juno-arp-gate>
+                <span>GATE <output>72%</output></span>
+                <input type="range" min="20" max="95" value="72" step="1" />
+              </label>
+            </div>
+            <p class="micro-help">Activa ARP, mantén un acorde y pulsa PLAY. HOLD conserva las notas al soltar; el siguiente acorde sustituye al anterior. El reloj usa el BPM global.</p>
+          </section>
+
           <div class="juno-console" id="junoControls">
             <section class="juno-module dco-module" aria-labelledby="junoDcoTitle">
               <div class="juno-module-title"><span>DCO</span><h2 id="junoDcoTitle">OSCILLATOR</h2></div>
@@ -686,12 +737,12 @@
       </main>
 
       <footer>
-        <span>VOLT/16 · AUDIO r13.0.1</span>
+        <span>VOLT/16 · AUDIO r13.1</span>
         <span>16 STEPS · 4/4 · MONO BASS · 4 VOICE J-4</span>
       </footer>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="./app.js?v=14"></script>
+  <script src="./app.js?v=15"></script>
   </body>
 </html>

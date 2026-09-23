@@ -115,6 +115,8 @@ function setup() {
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
       queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
+      buildArpSequence, scheduleArpeggiator,
+      setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
       getPlayheadTimerCount: () => playheadTimers.size ?? playheadTimers.length };
   `, context);
@@ -390,6 +392,78 @@ test("Mac keyboard mapping plays polyphonic J-4 notes and releases them on tab c
   api.switchTab("mixer");
   assert.equal(api.getComputerJunoHeldCount(), 0);
   assert.deepEqual(released.map(([midi]) => midi).sort((a, b) => a - b), [60, 64, 67, 71]);
+});
+
+test("ARP-5 builds deterministic UP, DOWN, UP/DOWN, and played-order ranges", () => {
+  const api = setup();
+  const notes = [{ midi: 67, order: 2 }, { midi: 60, order: 1 }, { midi: 64, order: 3 }, { midi: 60, order: 4 }];
+  assert.deepEqual(Array.from(api.buildArpSequence(notes, "UP", 2)), [60, 64, 67, 72, 76, 79]);
+  assert.deepEqual(Array.from(api.buildArpSequence(notes, "DOWN", 1)), [67, 64, 60]);
+  assert.deepEqual(Array.from(api.buildArpSequence(notes, "UP/DOWN", 1)), [60, 64, 67, 64]);
+  assert.deepEqual(Array.from(api.buildArpSequence(notes, "ORDER", 1)), [60, 67, 64]);
+});
+
+test("ARP-5 schedules triplets on the audio clock and derives note length from GATE", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.state.playing = true;
+  api.state.bpm = 120;
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.division = "1/8T";
+  api.state.juno.arp.gate = 0.5;
+  api.engine.junoInputNotes.set("60:test", { midi: 60, order: 1 });
+  api.setArpClock(0.1, 0.1);
+  api.scheduleArpeggiator(0, 0.45);
+
+  const voices = [...api.engine.junoVoices].sort((a, b) => a.startAt - b.startAt);
+  assert.equal(voices.length, 3);
+  assert.ok(Math.abs(voices[0].startAt - 0.1) < 1e-9);
+  assert.ok(Math.abs(voices[1].startAt - (0.1 + 1 / 6)) < 1e-9);
+  assert.ok(Math.abs(voices[2].startAt - (0.1 + 2 / 6)) < 1e-9);
+  voices.forEach((voice) => {
+    assert.equal(voice.origin, "arp");
+    assert.ok(Math.abs((voice.releasedAt - voice.startAt) - 1 / 12) < 1e-9);
+  });
+});
+
+test("ARP-5 HOLD keeps a released chord and replaces it on the next chord", async () => {
+  const api = setup();
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.hold = true;
+  await api.engine.pressJunoKey(60, "a");
+  await api.engine.pressJunoKey(64, "b");
+  api.engine.releaseJunoKey(60, "a");
+  api.engine.releaseJunoKey(64, "b");
+  assert.deepEqual([...api.engine.junoLatchedNotes.values()].map((note) => note.midi), [60, 64]);
+
+  await api.engine.pressJunoKey(67, "c");
+  await api.engine.pressJunoKey(71, "d");
+  assert.deepEqual([...api.engine.junoLatchedNotes.values()].map((note) => note.midi), [67, 71]);
+});
+
+test("ARP-5 STOP cancels queued voices and returns to the permanent graph", async () => {
+  const api = setup();
+  await api.engine.init();
+  const baselineNodes = api.ctx.nodes.size;
+  const baselineSources = api.ctx.sources.size;
+  api.state.playing = true;
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.division = "1/16";
+  api.engine.junoInputNotes.set("60:test", { midi: 60, order: 1 });
+  api.engine.junoInputNotes.set("64:test", { midi: 64, order: 2 });
+  api.setArpClock(0.1, 0.1);
+  api.scheduleArpeggiator(0, 0.3);
+  assert.ok(api.engine.junoVoices.size > 0);
+
+  api.stopTransport();
+  api.ctx.finishUntil(2);
+  for (const [id, callback] of [...api.callbacks]) { api.callbacks.delete(id); callback(); }
+  api.ctx.finishUntil(2.2);
+  assert.equal(api.engine.junoVoices.size, 0);
+  assert.equal(api.engine.junoUnit, null);
+  assert.equal(api.ctx.nodes.size, baselineNodes);
+  assert.equal(api.ctx.sources.size, baselineSources);
+  assert.equal(api.callbacks.size, 0);
 });
 
 test("maximum seven-channel FX load survives parameter churn, reuse, PLAY/STOP, and final cleanup", async () => {

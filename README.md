@@ -8,7 +8,7 @@ Groovebox para móvil y ordenador: batería de inspiración 808, bajo monofónic
 
 1. Abre la app y pulsa **PLAY** para iniciar el audio.
 2. Programa los pasos en **BATERÍA** y **BAJO**; ajusta el sonido del bajo en **SÍNTESIS**.
-3. En **JUNO**, toca el J-4 polifónico desde su piano de dos octavas o con el teclado del ordenador y edita DCO, filtro, envolvente, LFO y chorus.
+3. En **JUNO**, toca el J-4 polifónico desde su piano de dos octavas o con el teclado del ordenador. El ARP-5 ofrece cinco recorridos, HOLD, 1–3 octavas, GATE y cuatro divisiones sincronizadas.
 4. En **MEZCLA**, ajusta volumen, panorama, compresión y ecualización de cada canal.
 5. En **FX**, selecciona el canal y ajusta sus envíos a los efectos.
 
@@ -19,6 +19,7 @@ Durante la reproducción, editar batería o bajo modifica el patrón sin dispara
 - Batería: bombo, caja, palmas, charles cerrado y abierto.
 - Bajo: oscilador, suboscilador, filtro, envolvente, acento, slide y Auto Cutoff sincronizado al BPM.
 - J-4: cuatro voces, saw, pulse con PWM, suboscilador, HPF, filtro de 24 dB, ADSR, LFO y chorus estéreo OFF/I/II/I+II. En Mac/PC, las filas Z–M y Q–U permiten tocar dos octavas polifónicamente.
+- ARP-5: modos UP, DOWN, UP/DOWN, RANDOM y ORDER; 1–3 octavas, HOLD, GATE y divisiones 1/4, 1/8, 1/8T y 1/16. Se ejecuta desde el reloj anticipado de audio y comienza con PLAY.
 - Los editores de nota del bajo y del J-4 usan teclados de piano con blancas y negras superpuestas; en el bajo, cada tecla sigue asignando la nota al paso seleccionado.
 - Tempo, tap tempo y swing.
 - Por canal: compresor de inspiración óptica con gain y peak reduction; EQ con pasa altos, pasa bajos y dos shelving.
@@ -58,9 +59,13 @@ node --check dist/sw.js
 node --test tests/*.test.cjs
 ```
 
-Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM, los cinco efectos activos en los siete canales y pruebas específicas del J-4: creación diferida, cuatro voces, robo de voz, 4.000 cambios de parámetros y limpieza completa. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
+Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM, los cinco efectos activos en los siete canales y pruebas específicas del J-4 y ARP-5: creación diferida, cuatro voces, robo de voz, 4.000 cambios de parámetros, modos, octavas, tresillos, GATE, HOLD y limpieza completa. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Arquitectura de audio r13.0.1
+## Arquitectura de audio r13.1
+
+- ARP-5 mantiene separados el teclado físico, el acorde retenido por HOLD y las voces de audio. Así, soltar teclas no corta un acorde retenido y STOP puede retirar todas las voces sin dejar fuentes programadas.
+- Su reloj usa el mismo planificador anticipado del `AudioContext` que batería y bajo, pero conserva un contador propio para representar exactamente divisiones como 1/8T. `GATE` determina la duración como fracción del intervalo, sin temporizadores de interfaz ni saltos de ganancia.
+- UP, DOWN y UP/DOWN ordenan por altura; ORDER conserva el orden de pulsación y RANDOM evita repetir inmediatamente cuando existe más de una nota. El rango añade octavas sin superar MIDI 127.
 
 - El J-4 crea su bloque común de LFO y chorus solo al tocar la primera nota. Cada voz aporta saw, pulse formada por waveshaping, suboscilador, HPF, dos lowpass en cascada y VCA con ADSR.
 - La polifonía útil queda limitada a cuatro voces. La quinta nota roba la voz más antigua mediante un fundido de 9 ms; una voz retirada no puede volver a seleccionarse mientras termina ese fundido.
@@ -88,4 +93,4 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - El filtro del delay usa una Q sin resonancia para que el feedback máximo permitido no amplifique sucesivamente algunas frecuencias. En los filtros lowpass/highpass de Web Audio, Q se expresa en dB: [especificación de los filtros](https://www.w3.org/TR/webaudio/#filters-characteristics).
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
-Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.0.1**. En JUNO, mantén cuatro teclas del Mac, añade una quinta y verifica que el robo de voz no produce clic; comprueba también que al cambiar de pestaña no queda ninguna nota sostenida. Recorre DCO, filtro, ADSR, LFO y los cuatro modos de chorus; después prueba el canal 07 en MEZCLA y FX. En BAJO, confirma que el nuevo piano continúa cambiando la nota del paso seleccionado. Haz varios ciclos PLAY/STOP mientras suena: no debe haber saltos ni crujidos. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
+Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.1**. En JUNO, activa ARP, mantén un acorde y pulsa PLAY; recorre los cinco modos, las cuatro divisiones y 1–3 octavas. Activa HOLD, suelta el acorde y toca otro: el segundo debe sustituir al primero. Mueve GATE durante la reproducción y comprueba que cambia la articulación sin clics. Después haz varios ciclos PLAY/STOP: no debe quedar ninguna nota, salto ni crujido. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.

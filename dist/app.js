@@ -54,6 +54,13 @@ const AUTO_CUTOFF_DIVISION_CYCLES = {
   "1/4T": 1.5,
   "1/8": 2,
 };
+const ARP_DIVISION_BEATS = {
+  "1/4": 1,
+  "1/8": 0.5,
+  "1/8T": 1 / 3,
+  "1/16": 0.25,
+};
+const ARP_MODES = ["UP", "DOWN", "UP/DOWN", "RANDOM", "ORDER"];
 
 const BASS_GAIN_FLOOR = 0.0001;
 const BASS_FADE_TIME = 0.008;
@@ -194,6 +201,14 @@ const state = {
     lfoPitch: 0.04,
     lfoFilter: 0.16,
     chorusMode: "I",
+    arp: {
+      enabled: false,
+      hold: false,
+      mode: "UP",
+      division: "1/8",
+      octaves: 1,
+      gate: 0.72,
+    },
   },
   fx: {
     enabled: createFxEnabledStates(),
@@ -262,6 +277,30 @@ function midiToName(midi) {
   return `${name}${octave}`;
 }
 
+function buildArpSequence(notes, mode = "UP", octaves = 1) {
+  const unique = new Map();
+  notes.forEach((note, index) => {
+    const midi = Number(typeof note === "number" ? note : note.midi);
+    const order = Number(typeof note === "number" ? index : note.order ?? index);
+    if (Number.isFinite(midi) && !unique.has(midi)) unique.set(midi, { midi, order });
+  });
+  const base = [...unique.values()];
+  if (!base.length) return [];
+  const ordered = mode === "ORDER"
+    ? base.sort((a, b) => a.order - b.order)
+    : base.sort((a, b) => a.midi - b.midi);
+  const expanded = [];
+  for (let octave = 0; octave < clamp(Math.round(octaves), 1, 3); octave += 1) {
+    ordered.forEach(({ midi }) => {
+      const shifted = midi + octave * 12;
+      if (shifted <= 127) expanded.push(shifted);
+    });
+  }
+  if (mode === "DOWN") return expanded.reverse();
+  if (mode === "UP/DOWN" && expanded.length > 2) return [...expanded, ...expanded.slice(1, -1).reverse()];
+  return expanded;
+}
+
 function dbToGain(decibels) {
   return Math.pow(10, decibels / 20);
 }
@@ -311,6 +350,10 @@ class AudioEngine {
     this.junoPulseCurve = null;
     this.junoPreviewRequests = new Map();
     this.junoHeldVoices = new Map();
+    this.junoInputNotes = new Map();
+    this.junoLatchedNotes = new Map();
+    this.junoInputOrder = 0;
+    this.junoArpAwaitingChord = true;
     this.autoCutoff = null;
     this.drumVoices = new Set();
     this.bassPreviewRequest = 0;
@@ -690,7 +733,7 @@ class AudioEngine {
     return voice.sustain;
   }
 
-  startJunoVoice(midi, time, accent = false) {
+  startJunoVoice(midi, time, accent = false, origin = "live") {
     if (!this.ctx) return null;
     const unit = this.createJunoUnit();
     const synth = state.juno;
@@ -781,7 +824,7 @@ class AudioEngine {
     fade.connect(unit.input);
 
     const voice = {
-      midi, startAt, attack, decay, peak, sustain, baseCutoff, peakCutoff,
+      midi, origin, startAt, attack, decay, peak, sustain, baseCutoff, peakCutoff,
       releasedAt: Infinity, stopAt: Infinity, retiring: false,
       saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
       mix, highPass, filterA, filterB, amp, fade,
@@ -853,15 +896,27 @@ class AudioEngine {
     renderJunoVoiceLeds();
   }
 
-  scheduleJunoNote(midi, time, duration = 0.5, accent = false) {
-    const voice = this.startJunoVoice(midi, time, accent);
+  scheduleJunoNote(midi, time, duration = 0.5, accent = false, origin = "sequence") {
+    const voice = this.startJunoVoice(midi, time, accent, origin);
     if (voice) this.releaseJunoVoice(voice, time + Math.max(0.05, duration));
     return voice;
   }
 
-  stopJunoVoices() {
+  stopJunoArpVoices() {
+    if (!this.ctx) return;
+    [...this.junoVoices]
+      .filter((voice) => voice.origin === "arp")
+      .forEach((voice) => this.retireJunoVoice(voice, this.ctx.currentTime));
+  }
+
+  stopJunoVoices(clearInput = true) {
     this.junoPreviewRequests.clear();
     this.junoHeldVoices.clear();
+    if (clearInput) {
+      this.junoInputNotes.clear();
+      this.junoLatchedNotes.clear();
+      this.junoArpAwaitingChord = true;
+    }
     if (!this.ctx) return;
     [...this.junoVoices].forEach((voice) => this.retireJunoVoice(voice, this.ctx.currentTime));
   }
@@ -897,7 +952,16 @@ class AudioEngine {
     this.junoPreviewRequests.set(key, request);
     await this.init();
     if (this.junoPreviewRequests.get(key) !== request) return;
+    const note = { midi, order: this.junoInputOrder += 1 };
+    this.junoInputNotes.set(key, note);
     FX_NAMES.forEach((effect) => this.updateEffectSend("juno", effect));
+    if (state.juno.arp.enabled) {
+      if (state.juno.arp.hold && this.junoArpAwaitingChord) this.junoLatchedNotes.clear();
+      this.junoArpAwaitingChord = false;
+      this.junoLatchedNotes.set(key, note);
+      renderJunoArp();
+      return;
+    }
     const voice = this.startJunoVoice(midi, this.ctx.currentTime + 0.008);
     if (voice) this.junoHeldVoices.set(key, voice);
   }
@@ -905,9 +969,34 @@ class AudioEngine {
   releaseJunoKey(midi, pointerId) {
     const key = `${midi}:${pointerId}`;
     this.junoPreviewRequests.delete(key);
+    this.junoInputNotes.delete(key);
+    if (!state.juno.arp.hold) this.junoLatchedNotes.delete(key);
+    if (state.juno.arp.hold && this.junoInputNotes.size === 0) this.junoArpAwaitingChord = true;
     const voice = this.junoHeldVoices.get(key);
     this.junoHeldVoices.delete(key);
     if (voice) this.releaseJunoVoice(voice);
+    renderJunoArp();
+  }
+
+  setJunoArpEnabled(enabled) {
+    state.juno.arp.enabled = Boolean(enabled);
+    if (state.juno.arp.enabled) {
+      this.junoHeldVoices.forEach((voice) => this.retireJunoVoice(voice, this.ctx?.currentTime || 0));
+      this.junoHeldVoices.clear();
+      this.junoLatchedNotes = new Map(this.junoInputNotes);
+      this.junoArpAwaitingChord = this.junoInputNotes.size === 0;
+      resetArpClock();
+    } else {
+      this.stopJunoArpVoices();
+      this.junoLatchedNotes.clear();
+      this.junoArpAwaitingChord = true;
+      if (this.ctx) {
+        this.junoInputNotes.forEach((note, key) => {
+          const voice = this.startJunoVoice(note.midi, this.ctx.currentTime + 0.008);
+          if (voice) this.junoHeldVoices.set(key, voice);
+        });
+      }
+    }
   }
 
   createNoiseBuffer(seconds) {
@@ -1599,7 +1688,7 @@ class AudioEngine {
   stopVoices(disposeEffects = true) {
     this.drumPreviewRequests = {};
     this.stopBassVoices();
-    this.stopJunoVoices();
+    this.stopJunoVoices(disposeEffects);
     if (this.ctx) this.fadeDrumVoices(this.ctx.currentTime);
     if (disposeEffects) {
       this.disposeAutoCutoff();
@@ -1930,6 +2019,10 @@ let schedulerTimer = null;
 let transportRequest = 0;
 let nextStepTime = 0;
 let stepToSchedule = 0;
+let transportStartTime = 0;
+let nextArpTime = 0;
+let arpStepIndex = 0;
+let lastRandomArpMidi = null;
 let previousBassMidi = null;
 let previousStepHadBass = false;
 const playheadTimers = new Set();
@@ -1972,6 +2065,7 @@ const dom = {
   bassSlide: document.getElementById("bassSlideToggle"),
   junoKeyboard: document.getElementById("junoKeyboard"),
   junoVoiceLeds: document.getElementById("junoVoiceLeds"),
+  junoArpStatus: document.getElementById("junoArpStatus"),
   fxChannelNumber: document.getElementById("fxChannelNumber"),
   fxChannelName: document.getElementById("fxChannelName"),
   processorChannelNumber: document.getElementById("processorChannelNumber"),
@@ -2165,6 +2259,51 @@ function renderJunoVoiceLeds() {
   dom.junoVoiceLeds.setAttribute("aria-label", `${active} de ${JUNO_POLYPHONY} voces activas`);
 }
 
+function getJunoArpNotes() {
+  const source = state.juno.arp.hold ? engine.junoLatchedNotes : engine.junoInputNotes;
+  return buildArpSequence([...source.values()], state.juno.arp.mode, state.juno.arp.octaves);
+}
+
+function renderJunoArp() {
+  const arp = state.juno.arp;
+  document.querySelectorAll("[data-juno-arp-toggle]").forEach((button) => {
+    const name = button.dataset.junoArpToggle;
+    const enabled = Boolean(arp[name]);
+    button.classList.toggle("is-on", enabled);
+    button.setAttribute("aria-pressed", String(enabled));
+    button.textContent = name === "enabled" ? (enabled ? "ARP ON" : "ARP OFF") : "HOLD";
+  });
+  document.querySelectorAll("[data-juno-arp-mode]").forEach((button) => {
+    const active = button.dataset.junoArpMode === arp.mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-juno-arp-division]").forEach((button) => {
+    const active = button.dataset.junoArpDivision === arp.division;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-juno-arp-octaves]").forEach((button) => {
+    const active = Number(button.dataset.junoArpOctaves) === arp.octaves;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  const gate = [...document.querySelectorAll("[data-juno-arp-gate]")][0];
+  if (gate) {
+    const input = gate.querySelector("input");
+    input.value = String(Math.round(arp.gate * 100));
+    gate.querySelector("output").textContent = `${Math.round(arp.gate * 100)}%`;
+    rangeFill(input);
+  }
+  if (dom.junoArpStatus) {
+    const notes = getJunoArpNotes();
+    dom.junoArpStatus.textContent = !arp.enabled ? "BYPASS"
+      : !notes.length ? "WAITING FOR NOTES"
+        : state.playing ? `${notes.length} NOTE${notes.length === 1 ? "" : "S"} · CLOCKED`
+          : `${notes.length} NOTE${notes.length === 1 ? "" : "S"} · PRESS PLAY`;
+  }
+}
+
 function formatJunoOutput(name, rawValue) {
   const value = Number(rawValue);
   if (["sub", "pulseWidth", "pwmAmount", "sustain", "lfoPitch", "lfoFilter"].includes(name)) return `${Math.round(value)}%`;
@@ -2214,9 +2353,51 @@ function renderJunoControls() {
     rangeFill(input);
   });
   renderJunoVoiceLeds();
+  renderJunoArp();
 }
 
 function bindJunoControls() {
+  document.querySelectorAll("[data-juno-arp-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const name = button.dataset.junoArpToggle;
+      if (name === "enabled") engine.setJunoArpEnabled(!state.juno.arp.enabled);
+      else {
+        state.juno.arp.hold = !state.juno.arp.hold;
+        if (!state.juno.arp.hold) {
+          engine.junoLatchedNotes = new Map(engine.junoInputNotes);
+          engine.junoArpAwaitingChord = engine.junoInputNotes.size === 0;
+        }
+      }
+      renderJunoArp();
+    });
+  });
+  document.querySelectorAll("[data-juno-arp-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.juno.arp.mode = button.dataset.junoArpMode;
+      arpStepIndex = 0;
+      lastRandomArpMidi = null;
+      renderJunoArp();
+    });
+  });
+  document.querySelectorAll("[data-juno-arp-division]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.juno.arp.division = button.dataset.junoArpDivision;
+      resetArpClock();
+      renderJunoArp();
+    });
+  });
+  document.querySelectorAll("[data-juno-arp-octaves]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.juno.arp.octaves = Number(button.dataset.junoArpOctaves);
+      arpStepIndex = 0;
+      renderJunoArp();
+    });
+  });
+  const arpGate = [...document.querySelectorAll("[data-juno-arp-gate]")][0];
+  if (arpGate) arpGate.querySelector("input").addEventListener("input", (event) => {
+    state.juno.arp.gate = Number(event.target.value) / 100;
+    renderJunoArp();
+  });
   document.querySelectorAll("[data-juno-toggle]").forEach((button) => {
     button.addEventListener("click", () => {
       const name = button.dataset.junoToggle;
@@ -2230,7 +2411,7 @@ function bindJunoControls() {
   document.querySelectorAll("[data-juno-octave]").forEach((button) => {
     button.addEventListener("click", () => {
       state.juno.octave = Number(button.dataset.junoOctave);
-      engine.stopJunoVoices();
+      engine.stopJunoVoices(false);
       renderJunoControls();
     });
   });
@@ -2378,6 +2559,55 @@ function advanceStep() {
   stepToSchedule = (stepToSchedule + 1) % 16;
 }
 
+function getArpInterval() {
+  return 60 / clamp(state.bpm, 50, 190) * (ARP_DIVISION_BEATS[state.juno.arp.division] || 0.5);
+}
+
+function resetArpClock() {
+  arpStepIndex = 0;
+  lastRandomArpMidi = null;
+  if (!engine.ctx || !state.playing) {
+    nextArpTime = 0;
+    return;
+  }
+  const interval = getArpInterval();
+  const earliest = engine.ctx.currentTime + 0.012;
+  const elapsed = Math.max(0, earliest - transportStartTime);
+  nextArpTime = transportStartTime + Math.ceil(elapsed / interval) * interval;
+}
+
+function chooseArpNote(notes) {
+  if (!notes.length) return null;
+  if (state.juno.arp.mode !== "RANDOM") {
+    const note = notes[arpStepIndex % notes.length];
+    arpStepIndex += 1;
+    return note;
+  }
+  let candidates = notes;
+  if (notes.length > 1 && lastRandomArpMidi !== null) candidates = notes.filter((note) => note !== lastRandomArpMidi);
+  const note = candidates[Math.floor(Math.random() * candidates.length)];
+  lastRandomArpMidi = note;
+  return note;
+}
+
+function scheduleArpeggiator(now, horizon) {
+  if (!state.juno.arp.enabled) return;
+  const interval = getArpInterval();
+  const earliest = now + 0.005;
+  if (!nextArpTime) resetArpClock();
+  if (nextArpTime < earliest) {
+    const missed = Math.ceil((earliest - nextArpTime) / interval);
+    nextArpTime += missed * interval;
+    arpStepIndex += missed;
+  }
+  while (nextArpTime < horizon) {
+    const notes = getJunoArpNotes();
+    const midi = chooseArpNote(notes);
+    if (midi !== null) engine.scheduleJunoNote(midi, nextArpTime, interval * state.juno.arp.gate, false, "arp");
+    nextArpTime += interval;
+  }
+}
+
 function scheduler() {
   if (!state.playing || !engine.ctx) return;
   const now = engine.ctx.currentTime;
@@ -2395,6 +2625,7 @@ function scheduler() {
     scheduleStep(stepToSchedule, nextStepTime);
     advanceStep();
   }
+  scheduleArpeggiator(now, now + 0.11);
 }
 
 async function requestWakeLock() {
@@ -2436,10 +2667,15 @@ async function startTransport() {
     previousBassMidi = state.bassPattern[15].active ? state.bassPattern[15].midi : null;
     previousStepHadBass = state.bassPattern[15].active;
     nextStepTime = engine.ctx.currentTime + 0.055;
+    transportStartTime = nextStepTime;
+    nextArpTime = nextStepTime;
+    arpStepIndex = 0;
+    lastRandomArpMidi = null;
     engine.updateAutoCutoff(nextStepTime);
     scheduler();
     schedulerTimer = window.setInterval(scheduler, 25);
     updateTransportUI();
+    renderJunoArp();
     requestWakeLock();
   } catch (error) {
     if (request === transportRequest) {
@@ -2462,6 +2698,7 @@ function stopTransport() {
   playheadTimers.clear();
   clearPlayhead();
   updateTransportUI();
+  renderJunoArp();
   releaseWakeLock();
 }
 

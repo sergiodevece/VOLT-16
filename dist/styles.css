@@ -1509,6 +1509,7 @@ h2 {
 }
 
 .juno-performance,
+.juno-arp,
 .juno-console {
   overflow: hidden;
   border: 2px solid #29251f;
@@ -1521,6 +1522,97 @@ h2 {
   margin-bottom: 15px;
   padding: 15px;
   color: var(--cream);
+}
+
+.juno-arp {
+  margin-bottom: 15px;
+  padding: 14px;
+  color: var(--cream);
+}
+
+.juno-arp-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.juno-arp-heading h2 {
+  margin-top: 3px;
+  color: #e9ddc2;
+  font-size: 1.05rem;
+  letter-spacing: 0.16em;
+}
+
+.juno-arp-heading output {
+  min-width: 150px;
+  padding: 8px 10px;
+  border: 1px solid #514176;
+  color: #cfc2f1;
+  background: #100e0c;
+  font: 900 0.65rem/1.2 system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.juno-arp-grid {
+  display: grid;
+  grid-template-columns: 0.8fr 1.65fr 1.15fr 1fr 0.8fr;
+  gap: 10px;
+}
+
+.juno-arp-block {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #51463a;
+  background: linear-gradient(155deg, rgba(116, 97, 170, 0.16), rgba(0, 0, 0, 0.14));
+}
+
+.juno-arp-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--juno-light);
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.13em;
+}
+
+.juno-arp .juno-switch-row,
+.juno-arp .arp-button-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.juno-arp .arp-mode-row {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.juno-arp .arp-rate-block .arp-button-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.juno-arp .arp-octave-block .arp-button-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.juno-arp .mode-key,
+.juno-arp .juno-switch {
+  min-height: 37px;
+  padding-inline: 5px;
+  font-size: 0.58rem;
+}
+
+.juno-arp .juno-slider {
+  display: grid;
+  align-content: center;
+}
+
+.juno-arp .micro-help {
+  margin-bottom: 0;
+  color: #aa9a7d;
 }
 
 .juno-status-row {
@@ -2726,6 +2818,28 @@ footer {
   .juno-performance {
     margin-inline: -2px;
     padding: 12px 8px;
+  }
+
+  .juno-arp {
+    margin-inline: -2px;
+    padding: 12px 8px;
+  }
+
+  .juno-arp-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .arp-mode-block,
+  .arp-rate-block {
+    grid-column: 1 / -1;
+  }
+
+  .juno-arp .arp-mode-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .juno-arp-heading output {
+    min-width: 128px;
   }
 
   .juno-keyboard {

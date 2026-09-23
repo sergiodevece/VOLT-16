@@ -1,8 +1,8 @@
 "use strict";
 
 const CACHE_PREFIX = `volt16:${self.registration.scope}:`;
-const CACHE_NAME = `${CACHE_PREFIX}shell-v14`;
-const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js?v=14", "./manifest.webmanifest", "./icon.svg"];
+const CACHE_NAME = `${CACHE_PREFIX}shell-v15`;
+const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js?v=15", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
