@@ -2565,7 +2565,7 @@ function bindJunoControls() {
       state.juno[name] = junoStateValue(name, raw);
       control.querySelector("output").textContent = formatJunoOutput(name, raw);
       rangeFill(input);
-      engine.updateJunoVoices();
+      if (name !== "attack") engine.updateJunoVoices();
     });
   });
   if (dom.junoKeyboard) {

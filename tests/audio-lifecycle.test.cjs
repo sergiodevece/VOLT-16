@@ -115,15 +115,18 @@ function mockContext(sampleRate = 48000) {
   return ctx;
 }
 
-function setup() {
+function setup({ junoControls = [] } = {}) {
   const callbacks = new Map(); let nextId = 0;
   const elements = new Map();
   const element = () => ({ textContent: "", checked: false, hidden: false, children: [],
-    style: { setProperty() {} }, classList: { toggle() {}, remove() {}, contains() { return false; } },
-    setAttribute() {}, querySelector() { return element(); }, getContext() { return new Proxy({}, { get: () => () => {} }); },
+    style: { setProperty() {} }, classList: { add() {}, toggle() {}, remove() {}, contains() { return false; } },
+    setAttribute() {}, addEventListener() {}, querySelector() { return element(); },
+    getContext() { return new Proxy({}, { get: () => () => {} }); },
   });
   const ctx = mockContext();
-  const document = { visibilityState: "visible", querySelectorAll: () => [],
+  const document = { visibilityState: "visible",
+    querySelectorAll(selector) { return selector === "[data-juno-control]" ? junoControls : []; },
+    addEventListener() {},
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); } };
   const window = { AudioContext: function () { return ctx; },
     setTimeout(fn) { const id = ++nextId; callbacks.set(id, fn); return id; },
@@ -132,11 +135,13 @@ function setup() {
     clearInterval(id) { callbacks.delete(id); },
     requestAnimationFrame(fn) { const id = ++nextId; callbacks.set(id, fn); return id; },
     cancelAnimationFrame(id) { callbacks.delete(id); },
+    addEventListener() {},
   };
   const context = vm.createContext({ document, window, navigator: {}, console, performance: { now: () => 0 } });
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
       queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
+      bindJunoControls,
       buildArpSequence, scheduleArpeggiator,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
@@ -467,6 +472,56 @@ test("J-4 initializes shared modulation and chorus values before connect and sta
   ].forEach(([name, param]) => {
     assert.deepEqual(param.events, [], `${name} must not use setSmooth during construction`);
   });
+});
+
+test("editing J-4 Attack preserves a held manual voice and its amp automation", async () => {
+  const listeners = new Map();
+  const attackInput = {
+    min: "3", max: "2000", value: "18", style: { setProperty() {} },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const attackOutput = { textContent: "" };
+  const attackControl = {
+    dataset: { junoControl: "attack" },
+    querySelector(selector) { return selector === "input" ? attackInput : attackOutput; },
+  };
+  const { state, engine, ctx, bindJunoControls } = setup({ junoControls: [attackControl] });
+  await engine.pressJunoKey(60, "manual-test");
+  const heldKey = "60:manual-test";
+  const voice = engine.junoHeldVoices.get(heldKey);
+  assert.ok(voice, "manual key press must own a held voice");
+  ctx.currentTime = voice.startAt + voice.attack + voice.decay + 0.02;
+  const ampEventsBefore = structuredClone(voice.amp.gain.events);
+  const inputNoteBefore = engine.junoInputNotes.get(heldKey);
+  const playingBefore = state.playing;
+  let ampCancelCalls = 0;
+  const cancelAmp = voice.amp.gain.cancelScheduledValues.bind(voice.amp.gain);
+  voice.amp.gain.cancelScheduledValues = (...args) => {
+    ampCancelCalls += 1;
+    return cancelAmp(...args);
+  };
+  let updateVoiceCalls = 0;
+  const updateJunoVoices = engine.updateJunoVoices.bind(engine);
+  engine.updateJunoVoices = (...args) => {
+    updateVoiceCalls += 1;
+    return updateJunoVoices(...args);
+  };
+
+  bindJunoControls();
+  [3, 2000, 18, 1450].forEach((raw) => {
+    attackInput.value = String(raw);
+    listeners.get("input")();
+  });
+
+  assert.equal(state.juno.attack, 1.45, "Attack state uses the last slider value for future notes");
+  assert.equal(updateVoiceCalls, 0, "Attack must not reconfigure active voices");
+  assert.equal(voice.releasedAt, Infinity, "the held voice must not be released");
+  assert.strictEqual(engine.junoHeldVoices.get(heldKey), voice, "the manual key must retain its voice");
+  assert.strictEqual(engine.junoInputNotes.get(heldKey), inputNoteBefore, "Attack must not alter held-key input state");
+  assert.equal(state.playing, playingBefore, "Attack must not alter transport state");
+  assert.equal(ampCancelCalls, 0, "Attack must not cancel the held voice amplitude timeline");
+  assert.deepEqual(voice.amp.gain.events, ampEventsBefore, "Attack must retain the programmed amp envelope");
+  assert.ok(voice.amp.gain.valueAt(ctx.currentTime) > 0, "the held voice amplitude must remain audible");
 });
 
 test("J-4 keeps filter modulation above the safe floor and removes PWM DC", async () => {
