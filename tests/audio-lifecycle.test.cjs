@@ -421,9 +421,51 @@ test("ARP-5 schedules triplets on the audio clock and derives note length from G
   assert.ok(Math.abs(voices[1].startAt - (0.1 + 1 / 6)) < 1e-9);
   assert.ok(Math.abs(voices[2].startAt - (0.1 + 2 / 6)) < 1e-9);
   voices.forEach((voice) => {
-    assert.equal(voice.origin, "arp");
+    assert.equal(voice.origin, "arp-pool");
     assert.ok(Math.abs((voice.releasedAt - voice.startAt) - 1 / 12) < 1e-9);
   });
+});
+
+test("ARP-5 reuses four voices for ten minutes without clock gaps or node churn", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.state.playing = true;
+  api.state.bpm = 190;
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.division = "1/16";
+  api.state.juno.arp.gate = 0.72;
+  api.engine.junoInputNotes.set("60:test", { midi: 60, order: 1 });
+  api.engine.junoInputNotes.set("64:test", { midi: 64, order: 2 });
+  api.engine.junoInputNotes.set("67:test", { midi: 67, order: 3 });
+  const scheduledTimes = [];
+  const schedule = api.engine.scheduleJunoNote.bind(api.engine);
+  api.engine.scheduleJunoNote = (...args) => {
+    scheduledTimes.push(args[1]);
+    return schedule(...args);
+  };
+  api.setArpClock(0.05, 0.05);
+
+  for (let now = 0; now < 1; now += 0.025) {
+    api.ctx.currentTime = now;
+    api.scheduleArpeggiator(now, now + 0.11);
+  }
+  const warmNodes = api.ctx.nodes.size;
+  const warmCreated = api.ctx.created;
+  assert.equal(api.engine.junoArpVoicePool.length, 4);
+
+  for (let now = 1; now < 600; now += 0.025) {
+    api.ctx.currentTime = now;
+    api.scheduleArpeggiator(now, now + 0.11);
+  }
+  const interval = 60 / 190 / 4;
+  assert.ok(scheduledTimes.length > 7500, "the arpeggiator must continue through the full simulation");
+  for (let index = 1; index < scheduledTimes.length; index += 1) {
+    assert.ok(Math.abs((scheduledTimes[index] - scheduledTimes[index - 1]) - interval) < 1e-8,
+      `clock gap at note ${index}`);
+  }
+  assert.equal(api.engine.junoArpVoicePool.length, 4);
+  assert.equal(api.ctx.nodes.size, warmNodes);
+  assert.equal(api.ctx.created, warmCreated, "ARP notes must never allocate after the four-voice pool is warm");
 });
 
 test("ARP-5 HOLD keeps a released chord and replaces it on the next chord", async () => {
