@@ -230,6 +230,24 @@
                 <output>18%</output>
                 <input type="range" min="0" max="100" value="18" step="1" />
               </label>
+
+              <div class="bank-label"><span>AUTO CUTOFF</span><small>BPM LFO</small></div>
+              <section class="auto-cutoff-module" aria-label="Auto Cutoff sincronizado">
+                <button id="autoCutoffToggle" class="toggle-key auto-cutoff-toggle" type="button" aria-pressed="false">
+                  <span>AUTO</span><span>OFF</span>
+                </button>
+                <div class="auto-cutoff-divisions" role="radiogroup" aria-label="División rítmica del Auto Cutoff">
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/4">1/4</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/8T">1/8T</button>
+                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-auto-cutoff-division="1/8">1/8</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-auto-cutoff-division="1/16">1/16</button>
+                </div>
+                <label class="auto-cutoff-amount">
+                  <span>AMOUNT</span>
+                  <input id="autoCutoffAmount" type="range" min="0" max="100" value="45" step="1" />
+                  <output id="autoCutoffAmountValue">45%</output>
+                </label>
+              </section>
             </section>
           </div>
         </section>
@@ -507,12 +525,12 @@
       </main>
 
       <footer>
-        <span>VOLT/16 · AUDIO r9</span>
+        <span>VOLT/16 · AUDIO r10</span>
         <span>16 STEPS · 4/4 · MONO BASS</span>
       </footer>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js?v=9"></script>
+    <script src="./app.js?v=10"></script>
   </body>
 </html>

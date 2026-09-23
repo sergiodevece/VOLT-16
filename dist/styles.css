@@ -1410,6 +1410,64 @@ h2 {
   width: 90%;
 }
 
+.auto-cutoff-module {
+  grid-column: span 4;
+  display: grid;
+  grid-template-columns: minmax(86px, 0.45fr) minmax(260px, 1.4fr) minmax(180px, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 118px;
+  padding: 16px;
+  border-bottom: 1px solid #4c4438;
+  background: linear-gradient(115deg, rgba(46, 119, 113, 0.12), transparent 55%);
+}
+
+.auto-cutoff-toggle {
+  display: grid;
+  gap: 3px;
+  min-height: 64px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.09em;
+}
+
+.auto-cutoff-toggle span:last-child {
+  color: var(--teal-bright);
+  font-size: 0.62rem;
+}
+
+.auto-cutoff-divisions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+}
+
+.auto-cutoff-divisions .mode-key {
+  min-height: 46px;
+}
+
+.auto-cutoff-amount {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  color: #d8cba9;
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.auto-cutoff-amount input {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.auto-cutoff-amount output {
+  color: var(--amber);
+}
+
 .mixer-layout {
   display: grid;
   grid-template-columns: repeat(6, minmax(110px, 1fr));
@@ -2189,6 +2247,15 @@ footer {
 
   .dial-control {
     min-height: 166px;
+  }
+
+  .auto-cutoff-module {
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr;
+  }
+
+  .auto-cutoff-divisions {
+    grid-template-columns: repeat(4, minmax(52px, 1fr));
   }
 
   .mixer-layout {

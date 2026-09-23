@@ -45,6 +45,12 @@ const DELAY_DIVISION_BEATS = {
   "1/8D": 0.75,
   "1/4": 1,
 };
+const AUTO_CUTOFF_DIVISION_CYCLES = {
+  "1/4": 1,
+  "1/8T": 3,
+  "1/8": 2,
+  "1/16": 4,
+};
 
 const BASS_GAIN_FLOOR = 0.0001;
 const BASS_FADE_TIME = 0.008;
@@ -133,6 +139,9 @@ const state = {
     glide: 0.055,
     sub: 0.32,
     drive: 0.18,
+    autoCutoffEnabled: false,
+    autoCutoffDivision: "1/8",
+    autoCutoffAmount: 0.45,
   },
   fx: {
     enabled: createFxEnabledStates(),
@@ -236,6 +245,7 @@ class AudioEngine {
     this.driveCache = new Map();
     this.smoothParams = new WeakMap();
     this.bassVoices = new Set();
+    this.autoCutoff = null;
     this.drumVoices = new Set();
     this.bassPreviewRequest = 0;
     this.drumPreviewRequests = {};
@@ -338,6 +348,93 @@ class AudioEngine {
     this.updateAllEffectSends();
 
     if (this.ctx.state === "suspended") await this.ctx.resume();
+  }
+
+  autoCutoffFrequency() {
+    const cycles = AUTO_CUTOFF_DIVISION_CYCLES[state.synth.autoCutoffDivision] || 2;
+    return state.bpm / 60 * cycles;
+  }
+
+  createAutoCutoff(startTime = null) {
+    if (!this.ctx || !state.synth.autoCutoffEnabled) return null;
+    if (this.autoCutoff) {
+      if (this.autoCutoff.cleanupTimer !== null) window.clearTimeout(this.autoCutoff.cleanupTimer);
+      this.autoCutoff.cleanupTimer = null;
+      this.setSmooth(this.autoCutoff.lfo.frequency, this.autoCutoffFrequency(), 0.035);
+      this.setSmooth(this.autoCutoff.depth.gain, state.synth.autoCutoffAmount * 3000, 0.025);
+      return this.autoCutoff;
+    }
+    const lfo = this.ctx.createOscillator();
+    const depth = this.ctx.createGain();
+    lfo.type = "triangle";
+    lfo.frequency.value = this.autoCutoffFrequency();
+    depth.gain.value = state.synth.autoCutoffAmount * 3000;
+    lfo.connect(depth);
+    lfo.start(Math.max(this.ctx.currentTime, startTime ?? this.ctx.currentTime));
+    this.autoCutoff = { lfo, depth, filters: new Set(), cleanupTimer: null, lfoStopped: false };
+    return this.autoCutoff;
+  }
+
+  updateAutoCutoff(startTime = null) {
+    if (!this.ctx) return;
+    if (!state.synth.autoCutoffEnabled) {
+      this.scheduleAutoCutoffDisposal();
+      return;
+    }
+    const unit = this.autoCutoff || (state.playing || startTime !== null ? this.createAutoCutoff(startTime) : null);
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.cleanupTimer = null;
+    this.setSmooth(unit.lfo.frequency, this.autoCutoffFrequency(), 0.035);
+    this.setSmooth(unit.depth.gain, state.synth.autoCutoffAmount * 3000, 0.025);
+    this.bassVoices.forEach((voice) => this.attachAutoCutoff(voice.filters));
+  }
+
+  attachAutoCutoff(filters, startTime) {
+    const unit = this.createAutoCutoff(startTime);
+    if (!unit) return;
+    filters.forEach((filter) => {
+      if (unit.filters.has(filter)) return;
+      unit.depth.connect(filter.frequency);
+      unit.filters.add(filter);
+    });
+  }
+
+  detachAutoCutoff(filters) {
+    const unit = this.autoCutoff;
+    if (!unit) return;
+    filters.forEach((filter) => {
+      try { unit.depth.disconnect(filter.frequency); } catch { /* already detached */ }
+      unit.filters.delete(filter);
+    });
+    if (!state.playing && unit.filters.size === 0) this.scheduleAutoCutoffDisposal();
+  }
+
+  scheduleAutoCutoffDisposal() {
+    const unit = this.autoCutoff;
+    if (!unit || unit.cleanupTimer !== null) return;
+    this.setSmooth(unit.depth.gain, 0, 0.018);
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (!state.synth.autoCutoffEnabled || (!state.playing && unit.filters.size === 0)) this.disposeAutoCutoff();
+    }, 80);
+  }
+
+  disposeAutoCutoff() {
+    const unit = this.autoCutoff;
+    if (!unit) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    unit.filters.forEach((filter) => {
+      try { unit.depth.disconnect(filter.frequency); } catch { /* already detached */ }
+    });
+    unit.filters.clear();
+    if (!unit.lfoStopped) {
+      unit.lfo.stop(this.ctx?.currentTime || 0);
+      unit.lfoStopped = true;
+    }
+    unit.lfo.disconnect();
+    unit.depth.disconnect();
+    this.autoCutoff = null;
   }
 
   createNoiseBuffer(seconds) {
@@ -1007,6 +1104,7 @@ class AudioEngine {
     this.stopBassVoices();
     if (this.ctx) this.fadeDrumVoices(this.ctx.currentTime);
     if (disposeEffects) {
+      this.disposeAutoCutoff();
       this.disposeAllChannelDelays();
       this.disposeAllChannelChoruses();
       this.disposeAllChannelPhasers();
@@ -1214,6 +1312,7 @@ class AudioEngine {
       filter.frequency.exponentialRampToValueAtTime(peakCutoff, time + attack);
       filter.frequency.exponentialRampToValueAtTime(baseCutoff, time + attack + decay);
     });
+    this.attachAutoCutoff([filterA, filterB], time);
 
     const peak = 0.72 * accent;
     const sustain = Math.max(BASS_GAIN_FLOOR, peak * synth.sustain);
@@ -1254,13 +1353,14 @@ class AudioEngine {
     // Retire the previous mono voice with an independent fade, so its existing
     // ADSR automation stays continuous even if a new note arrives mid-release.
     this.fadeBassVoices(time);
-    const voice = { osc, sub, amp, fade, stopAt, fadeAt: Infinity };
+    const voice = { osc, sub, amp, fade, filters: [filterA, filterB], stopAt, fadeAt: Infinity };
     this.bassVoices.add(voice);
     let endedSources = 0;
     const cleanup = () => {
       endedSources += 1;
       if (endedSources !== 2) return;
       osc.onended = sub.onended = null;
+      this.detachAutoCutoff(voice.filters);
       [osc, sub, oscGain, subGain, drive, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
       this.bassVoices.delete(voice);
     };
@@ -1604,6 +1704,7 @@ async function startTransport() {
     previousBassMidi = state.bassPattern[15].active ? state.bassPattern[15].midi : null;
     previousStepHadBass = state.bassPattern[15].active;
     nextStepTime = engine.ctx.currentTime + 0.055;
+    engine.updateAutoCutoff(nextStepTime);
     scheduler();
     schedulerTimer = window.setInterval(scheduler, 25);
     updateTransportUI();
@@ -1660,6 +1761,7 @@ function setBpm(value) {
   state.bpm = clamp(Math.round(Number(value) || state.bpm), 50, 190);
   dom.bpm.value = String(state.bpm);
   engine.updateSyncedDelays();
+  engine.updateAutoCutoff();
   renderFxParameters();
 }
 
@@ -1818,6 +1920,40 @@ function bindSynthControls() {
     input.addEventListener("input", update);
     update();
   });
+
+  const autoToggle = document.getElementById("autoCutoffToggle");
+  const autoAmount = document.getElementById("autoCutoffAmount");
+  const renderAutoCutoff = () => {
+    autoToggle.classList.toggle("is-on", state.synth.autoCutoffEnabled);
+    autoToggle.setAttribute("aria-pressed", String(state.synth.autoCutoffEnabled));
+    autoToggle.querySelector("span:last-child").textContent = state.synth.autoCutoffEnabled ? "ON" : "OFF";
+    document.querySelectorAll("[data-auto-cutoff-division]").forEach((button) => {
+      const active = button.dataset.autoCutoffDivision === state.synth.autoCutoffDivision;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-checked", String(active));
+    });
+    document.getElementById("autoCutoffAmountValue").textContent = `${Math.round(state.synth.autoCutoffAmount * 100)}%`;
+  };
+  autoToggle.addEventListener("click", () => {
+    state.synth.autoCutoffEnabled = !state.synth.autoCutoffEnabled;
+    engine.updateAutoCutoff();
+    renderAutoCutoff();
+  });
+  document.querySelectorAll("[data-auto-cutoff-division]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.synth.autoCutoffDivision = button.dataset.autoCutoffDivision;
+      engine.updateAutoCutoff();
+      renderAutoCutoff();
+    });
+  });
+  autoAmount.addEventListener("input", () => {
+    state.synth.autoCutoffAmount = Number(autoAmount.value) / 100;
+    rangeFill(autoAmount);
+    engine.updateAutoCutoff();
+    renderAutoCutoff();
+  });
+  rangeFill(autoAmount);
+  renderAutoCutoff();
 }
 
 function fxOutput(name, raw) {
