@@ -98,6 +98,20 @@ const state = {
   bpm: 112,
   swing: 54,
   master: 0.82,
+  masterProcessor: {
+    limiterEnabled: false,
+    limiterThreshold: -3,
+    limiterAttack: 0.001,
+    limiterRelease: 0.12,
+    limiterCeiling: -1,
+    eqEnabled: true,
+    highPassFreq: 20,
+    lowShelfFreq: 120,
+    lowShelfGain: 0,
+    highShelfFreq: 6500,
+    highShelfGain: 0,
+    lowPassFreq: 20000,
+  },
   playing: false,
   starting: false,
   currentStep: -1,
@@ -233,7 +247,16 @@ function panLabel(value) {
 class AudioEngine {
   constructor() {
     this.ctx = null;
+    this.masterInput = null;
     this.masterGain = null;
+    this.masterLimiter = null;
+    this.masterLimiterDry = null;
+    this.masterLimiterWet = null;
+    this.masterCeiling = null;
+    this.masterPostLimiter = null;
+    this.masterEqDry = null;
+    this.masterEqWet = null;
+    this.masterEq = null;
     this.mixBus = null;
     this.channels = {};
     this.noiseBuffer = null;
@@ -267,29 +290,73 @@ class AudioEngine {
     } catch {
       this.ctx = new Context();
     }
+    this.masterInput = this.ctx.createGain();
+    this.masterLimiter = this.ctx.createDynamicsCompressor();
+    this.masterLimiterDry = this.ctx.createGain();
+    this.masterLimiterWet = this.ctx.createGain();
+    this.masterCeiling = this.ctx.createGain();
+    this.masterPostLimiter = this.ctx.createGain();
+    this.masterEqDry = this.ctx.createGain();
+    this.masterEqWet = this.ctx.createGain();
+    const masterHighPass = this.ctx.createBiquadFilter();
+    const masterLowShelf = this.ctx.createBiquadFilter();
+    const masterHighShelf = this.ctx.createBiquadFilter();
+    const masterLowPass = this.ctx.createBiquadFilter();
     this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = state.master;
 
-    const limiter = this.ctx.createDynamicsCompressor();
-    limiter.threshold.value = -8;
-    limiter.knee.value = 7;
-    limiter.ratio.value = 14;
-    limiter.attack.value = 0.003;
-    limiter.release.value = 0.14;
+    this.masterLimiter.knee.value = 0;
+    this.masterLimiter.ratio.value = 20;
+    this.masterLimiter.threshold.value = state.masterProcessor.limiterThreshold;
+    this.masterLimiter.attack.value = state.masterProcessor.limiterAttack;
+    this.masterLimiter.release.value = state.masterProcessor.limiterRelease;
+    this.masterLimiterDry.gain.value = state.masterProcessor.limiterEnabled ? 0 : 1;
+    this.masterLimiterWet.gain.value = state.masterProcessor.limiterEnabled ? 1 : 0;
+    this.masterCeiling.gain.value = dbToGain(state.masterProcessor.limiterCeiling - state.masterProcessor.limiterThreshold);
+    this.masterEqDry.gain.value = state.masterProcessor.eqEnabled ? 0 : 1;
+    this.masterEqWet.gain.value = state.masterProcessor.eqEnabled ? 1 : 0;
+    this.masterGain.gain.value = state.master;
+    masterHighPass.type = "highpass";
+    masterHighPass.Q.value = NON_RESONANT_Q_DB;
+    masterLowShelf.type = "lowshelf";
+    masterHighShelf.type = "highshelf";
+    masterLowPass.type = "lowpass";
+    masterLowPass.Q.value = NON_RESONANT_Q_DB;
+    masterHighPass.frequency.value = state.masterProcessor.highPassFreq;
+    masterLowShelf.frequency.value = state.masterProcessor.lowShelfFreq;
+    masterLowShelf.gain.value = state.masterProcessor.lowShelfGain;
+    masterHighShelf.frequency.value = state.masterProcessor.highShelfFreq;
+    masterHighShelf.gain.value = state.masterProcessor.highShelfGain;
+    masterLowPass.frequency.value = state.masterProcessor.lowPassFreq;
+    this.masterEq = { highPass: masterHighPass, lowShelf: masterLowShelf, highShelf: masterHighShelf, lowPass: masterLowPass };
+
+    this.masterInput.connect(this.masterLimiterDry);
+    this.masterLimiterDry.connect(this.masterPostLimiter);
+    this.masterInput.connect(this.masterLimiter);
+    this.masterLimiter.connect(this.masterCeiling);
+    this.masterCeiling.connect(this.masterLimiterWet);
+    this.masterLimiterWet.connect(this.masterPostLimiter);
+
+    this.masterPostLimiter.connect(this.masterEqDry);
+    this.masterEqDry.connect(this.masterGain);
+    this.masterPostLimiter.connect(masterHighPass);
+    masterHighPass.connect(masterLowShelf);
+    masterLowShelf.connect(masterHighShelf);
+    masterHighShelf.connect(masterLowPass);
+    masterLowPass.connect(this.masterEqWet);
+    this.masterEqWet.connect(this.masterGain);
 
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 1024;
     this.analyser.smoothingTimeConstant = 0.76;
 
-    this.masterGain.connect(limiter);
-    limiter.connect(this.analyser);
+    this.masterGain.connect(this.analyser);
     this.analyser.connect(this.ctx.destination);
 
     this.mixBus = this.ctx.createGain();
     const dryGain = this.ctx.createGain();
     dryGain.gain.value = 0.93;
     this.mixBus.connect(dryGain);
-    dryGain.connect(this.masterGain);
+    dryGain.connect(this.masterInput);
 
     CHANNELS.forEach(({ id }) => {
       const input = this.ctx.createGain();
@@ -347,6 +414,7 @@ class AudioEngine {
     this.updateAllChannels();
     this.updateAllProcessors();
     this.updateMaster();
+    this.updateMasterProcessor();
     this.updateAllEffectSends();
 
     if (this.ctx.state === "suspended") await this.ctx.resume();
@@ -479,7 +547,7 @@ class AudioEngine {
     const ctx = this.ctx;
     const reverbWet = ctx.createGain();
     reverbWet.gain.value = 0.78;
-    reverbWet.connect(this.masterGain);
+    reverbWet.connect(this.masterInput);
     // Convolution is linear, so channels with the same preset can share its
     // kernel after their independent damping and preset gains have been applied.
     const banks = {};
@@ -533,7 +601,7 @@ class AudioEngine {
     delayRight.connect(toneRight);
     toneRight.connect(pannerRight);
     pannerRight.connect(wet);
-    wet.connect(this.masterGain);
+    wet.connect(this.masterInput);
     tone.connect(feedback);
     feedback.connect(delay);
     tone.connect(crossFeedbackLeft);
@@ -646,7 +714,7 @@ class AudioEngine {
     this.channels[channelId].panner.connect(send);
     send.connect(delay);
     delay.connect(wet);
-    wet.connect(this.masterGain);
+    wet.connect(this.masterInput);
     lfo.connect(depth);
     depth.connect(delay.delayTime);
     lfo.start();
@@ -729,7 +797,7 @@ class AudioEngine {
       if (filters[index + 1]) filter.connect(filters[index + 1]);
     });
     filters.at(-1).connect(wet);
-    wet.connect(this.masterGain);
+    wet.connect(this.masterInput);
     lfo.start();
 
     const unit = { channelId, send, filters, wet, lfo, depths, cleanupTimer: null, lfoStopped: false };
@@ -801,7 +869,7 @@ class AudioEngine {
     this.channels[channelId].panner.connect(send);
     send.connect(delay);
     delay.connect(wet);
-    wet.connect(this.masterGain);
+    wet.connect(this.masterInput);
     delay.connect(feedback);
     feedback.connect(delay);
     lfo.connect(depth);
@@ -953,6 +1021,30 @@ class AudioEngine {
 
   updateMaster() {
     if (this.masterGain) this.setSmooth(this.masterGain.gain, state.master);
+  }
+
+  updateMasterProcessor() {
+    if (!this.ctx || !this.masterLimiter || !this.masterEq) return;
+    const master = state.masterProcessor;
+    const frequencyLimit = this.ctx.sampleRate * 0.49;
+    this.setSmooth(this.masterLimiter.threshold, master.limiterThreshold);
+    this.setSmooth(this.masterLimiter.attack, master.limiterAttack);
+    this.setSmooth(this.masterLimiter.release, master.limiterRelease);
+    // DynamicsCompressorNode has no output ceiling control. Referencing its
+    // post gain to the threshold makes the compressed threshold land at the
+    // requested pre-EQ ceiling. The creative EQ deliberately comes later.
+    this.setSmooth(this.masterCeiling.gain, dbToGain(master.limiterCeiling - master.limiterThreshold));
+    this.setSmooth(this.masterLimiterDry.gain, master.limiterEnabled ? 0 : 1, 0.025, true);
+    this.setSmooth(this.masterLimiterWet.gain, master.limiterEnabled ? 1 : 0, 0.025, true);
+
+    this.setSmooth(this.masterEq.highPass.frequency, clamp(master.highPassFreq, 20, frequencyLimit));
+    this.setSmooth(this.masterEq.lowShelf.frequency, clamp(master.lowShelfFreq, 20, frequencyLimit));
+    this.setSmooth(this.masterEq.lowShelf.gain, master.lowShelfGain);
+    this.setSmooth(this.masterEq.highShelf.frequency, clamp(master.highShelfFreq, 20, frequencyLimit));
+    this.setSmooth(this.masterEq.highShelf.gain, master.highShelfGain);
+    this.setSmooth(this.masterEq.lowPass.frequency, clamp(master.lowPassFreq, 20, frequencyLimit));
+    this.setSmooth(this.masterEqDry.gain, master.eqEnabled ? 0 : 1, 0.025, true);
+    this.setSmooth(this.masterEqWet.gain, master.eqEnabled ? 1 : 0, 0.025, true);
   }
 
   updateChannel(id) {
@@ -1463,6 +1555,8 @@ let activeTab = "drums";
 let meterAnimationFrame = null;
 let lastMeterFrame = -Infinity;
 let scopeData = null;
+let masterMeterData = null;
+let masterClipHoldUntil = 0;
 let wakeLock = null;
 let toastTimer = null;
 let tapTimes = [];
@@ -1476,6 +1570,13 @@ const dom = {
   swingValue: document.getElementById("swingValue"),
   master: document.getElementById("masterControl"),
   masterValue: document.getElementById("masterValue"),
+  masterOutput: document.getElementById("masterOutputControl"),
+  masterOutputValue: document.getElementById("masterOutputValue"),
+  masterReductionBar: document.getElementById("masterReductionBar"),
+  masterReductionValue: document.getElementById("masterReductionValue"),
+  masterPeakBar: document.getElementById("masterPeakBar"),
+  masterPeakValue: document.getElementById("masterPeakValue"),
+  masterClipLamp: document.getElementById("masterClipLamp"),
   positionLeds: document.getElementById("positionLeds"),
   beatCounter: document.getElementById("beatCounter"),
   drumSequencer: document.getElementById("drumSequencer"),
@@ -2240,6 +2341,97 @@ function renderReductionMeter() {
   const reduction = compressor ? clamp(Math.abs(Number(compressor.reduction) || 0), 0, 24) : 0;
   dom.reductionMeterBar.style.height = `${reduction / 24 * 100}%`;
   dom.reductionMeterValue.textContent = `${reduction.toFixed(1)} dB`;
+
+  const masterReduction = state.masterProcessor.limiterEnabled && engine.masterLimiter
+    ? clamp(Math.abs(Number(engine.masterLimiter.reduction) || 0), 0, 24) : 0;
+  dom.masterReductionBar.style.width = `${masterReduction / 24 * 100}%`;
+  dom.masterReductionValue.textContent = `${masterReduction.toFixed(1)} dB`;
+
+  if (!engine.analyser) return;
+  const size = engine.analyser.fftSize;
+  let peak = 0;
+  if (typeof engine.analyser.getFloatTimeDomainData === "function") {
+    if (!(masterMeterData instanceof Float32Array) || masterMeterData.length !== size) masterMeterData = new Float32Array(size);
+    engine.analyser.getFloatTimeDomainData(masterMeterData);
+    masterMeterData.forEach((sample) => { peak = Math.max(peak, Math.abs(sample)); });
+  } else {
+    if (!(masterMeterData instanceof Uint8Array) || masterMeterData.length !== size) masterMeterData = new Uint8Array(size);
+    engine.analyser.getByteTimeDomainData(masterMeterData);
+    masterMeterData.forEach((sample) => { peak = Math.max(peak, Math.abs((sample - 128) / 128)); });
+  }
+  const peakDb = peak > 0.000001 ? 20 * Math.log10(peak) : -Infinity;
+  dom.masterPeakBar.style.width = `${clamp((peakDb + 60) / 60 * 100, 0, 100)}%`;
+  dom.masterPeakValue.textContent = Number.isFinite(peakDb) ? `${peakDb.toFixed(1)} dBFS` : "−∞ dBFS";
+  if (peak >= 1) masterClipHoldUntil = performance.now() + 900;
+  dom.masterClipLamp.classList.toggle("is-clipping", performance.now() < masterClipHoldUntil);
+}
+
+function formatMasterOutput(name, value) {
+  if (["limiterThreshold", "limiterCeiling", "lowShelfGain", "highShelfGain"].includes(name)) return `${Number(value).toFixed(1).replace("-", "−")} dB`;
+  if (["limiterAttack", "limiterRelease"].includes(name)) return `${Number(value).toFixed(value < 10 ? 1 : 0)} ms`;
+  return formatProcessorOutput(name, value);
+}
+
+function masterRawValue(name, value) {
+  return ["limiterAttack", "limiterRelease"].includes(name) ? value * 1000 : value;
+}
+
+function setMasterVolume(rawValue) {
+  const raw = clamp(Number(rawValue), 0, 100);
+  state.master = raw / 100;
+  dom.master.value = String(raw);
+  dom.masterOutput.value = String(raw);
+  dom.masterValue.textContent = `${Math.round(raw)}%`;
+  dom.masterOutputValue.textContent = `${Math.round(raw)}%`;
+  rangeFill(dom.master);
+  rangeFill(dom.masterOutput);
+  engine.updateMaster();
+}
+
+function renderMasterProcessor() {
+  const master = state.masterProcessor;
+  const limiterToggle = document.getElementById("masterLimiterToggle");
+  const eqToggle = document.getElementById("masterEqToggle");
+  [[limiterToggle, master.limiterEnabled], [eqToggle, master.eqEnabled]].forEach(([button, enabled]) => {
+    button.classList.toggle("is-on", enabled);
+    button.setAttribute("aria-pressed", String(enabled));
+    button.querySelector("span:last-child").textContent = enabled ? "ON" : "OFF";
+  });
+  document.querySelectorAll("[data-master-control]").forEach((control) => {
+    const name = control.dataset.masterControl;
+    const raw = masterRawValue(name, master[name]);
+    const input = control.querySelector("input");
+    input.value = String(raw);
+    control.querySelector("output").textContent = formatMasterOutput(name, raw);
+    rangeFill(input);
+  });
+  setMasterVolume(state.master * 100);
+}
+
+function bindMasterProcessor() {
+  document.getElementById("masterLimiterToggle").addEventListener("click", () => {
+    state.masterProcessor.limiterEnabled = !state.masterProcessor.limiterEnabled;
+    engine.updateMasterProcessor();
+    renderMasterProcessor();
+  });
+  document.getElementById("masterEqToggle").addEventListener("click", () => {
+    state.masterProcessor.eqEnabled = !state.masterProcessor.eqEnabled;
+    engine.updateMasterProcessor();
+    renderMasterProcessor();
+  });
+  document.querySelectorAll("[data-master-control]").forEach((control) => {
+    const input = control.querySelector("input");
+    const name = control.dataset.masterControl;
+    input.addEventListener("input", () => {
+      const raw = Number(input.value);
+      state.masterProcessor[name] = ["limiterAttack", "limiterRelease"].includes(name) ? raw / 1000 : raw;
+      control.querySelector("output").textContent = formatMasterOutput(name, raw);
+      rangeFill(input);
+      engine.updateMasterProcessor();
+    });
+  });
+  dom.masterOutput.addEventListener("input", () => setMasterVolume(dom.masterOutput.value));
+  renderMasterProcessor();
 }
 
 function bindChannelProcessor() {
@@ -2325,12 +2517,7 @@ function bindTransport() {
     rangeFill(dom.swing);
   });
 
-  dom.master.addEventListener("input", () => {
-    state.master = Number(dom.master.value) / 100;
-    dom.masterValue.textContent = `${dom.master.value}%`;
-    rangeFill(dom.master);
-    engine.updateMaster();
-  });
+  dom.master.addEventListener("input", () => setMasterVolume(dom.master.value));
 
   document.getElementById("tapTempo").addEventListener("click", () => {
     const now = performance.now();
@@ -2456,6 +2643,7 @@ function initialize() {
   bindSynthControls();
   bindEffects();
   bindChannelProcessor();
+  bindMasterProcessor();
   bindMixer();
   bindTransport();
   bindTabs();

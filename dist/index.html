@@ -377,6 +377,82 @@
             <div class="panel-stamp" id="outputStatus">SALIDA DEL DISPOSITIVO</div>
           </div>
 
+          <section class="master-panel" aria-labelledby="masterTitle">
+            <div class="processor-heading master-heading">
+              <div>
+                <p class="eyebrow">CREATIVE MASTER SECTION</p>
+                <h2 id="masterTitle">MASTER <strong>OUT</strong></h2>
+              </div>
+              <div class="signal-route" aria-label="Orden del procesamiento master">
+                <span>LIMITER</span><i>›</i><span>EQ 4</span><i>›</i><span>VOLUME</span><i>›</i><span>METER</span>
+              </div>
+            </div>
+
+            <div class="master-layout">
+              <section class="master-card limiter-card" aria-labelledby="masterLimiterTitle">
+                <div class="processor-card-title">
+                  <div><span>DYNAMICS</span><h3 id="masterLimiterTitle">LIMITER</h3></div>
+                  <button id="masterLimiterToggle" class="toggle-key master-toggle" type="button" aria-pressed="false"><span>LIMITER</span><span>OFF</span></button>
+                </div>
+                <div class="master-control-grid">
+                  <label class="processor-slider" data-master-control="limiterThreshold"><span>THRESHOLD <output>−3.0 dB</output></span><input type="range" min="-18" max="0" value="-3" step="0.5" /></label>
+                  <label class="processor-slider" data-master-control="limiterAttack"><span>ATTACK <output>1 ms</output></span><input type="range" min="0" max="20" value="1" step="0.5" /></label>
+                  <label class="processor-slider" data-master-control="limiterRelease"><span>RELEASE <output>120 ms</output></span><input type="range" min="40" max="800" value="120" step="10" /></label>
+                  <label class="processor-slider" data-master-control="limiterCeiling"><span>CEILING PRE-EQ <output>−1.0 dB</output></span><input type="range" min="-6" max="0" value="-1" step="0.1" /></label>
+                </div>
+                <div class="master-reduction">
+                  <span>GAIN REDUCTION</span>
+                  <div><i id="masterReductionBar"></i></div>
+                  <output id="masterReductionValue">0.0 dB</output>
+                </div>
+              </section>
+
+              <section class="master-card master-eq-card" aria-labelledby="masterEqTitle">
+                <div class="processor-card-title">
+                  <div><span>POST-LIMITER · MUSICAL</span><h3 id="masterEqTitle">MASTER EQ</h3></div>
+                  <button id="masterEqToggle" class="toggle-key master-toggle is-on" type="button" aria-pressed="true"><span>EQ</span><span>ON</span></button>
+                </div>
+                <div class="master-eq-grid">
+                  <section class="filter-module edge-filter">
+                    <div class="filter-name"><span>01</span><strong>HIGH PASS</strong></div>
+                    <label class="processor-slider" data-master-control="highPassFreq"><span>FREQ <output>20 Hz</output></span><input type="range" min="20" max="500" value="20" step="1" /></label>
+                  </section>
+                  <section class="filter-module shelf-filter">
+                    <div class="filter-name"><span>02</span><strong>LOW SHELF</strong></div>
+                    <label class="processor-slider" data-master-control="lowShelfFreq"><span>FREQ <output>120 Hz</output></span><input type="range" min="40" max="800" value="120" step="5" /></label>
+                    <label class="processor-slider gain-slider" data-master-control="lowShelfGain"><span>GAIN <output>0.0 dB</output></span><input type="range" min="-15" max="15" value="0" step="0.5" /></label>
+                  </section>
+                  <section class="filter-module shelf-filter">
+                    <div class="filter-name"><span>03</span><strong>HIGH SHELF</strong></div>
+                    <label class="processor-slider" data-master-control="highShelfFreq"><span>FREQ <output>6.5 kHz</output></span><input type="range" min="1200" max="16000" value="6500" step="100" /></label>
+                    <label class="processor-slider gain-slider" data-master-control="highShelfGain"><span>GAIN <output>0.0 dB</output></span><input type="range" min="-15" max="15" value="0" step="0.5" /></label>
+                  </section>
+                  <section class="filter-module edge-filter">
+                    <div class="filter-name"><span>04</span><strong>LOW PASS</strong></div>
+                    <label class="processor-slider" data-master-control="lowPassFreq"><span>FREQ <output>20.0 kHz</output></span><input type="range" min="3000" max="20000" value="20000" step="100" /></label>
+                  </section>
+                </div>
+              </section>
+
+              <section class="master-card master-output-card" aria-labelledby="masterOutputTitle">
+                <div class="processor-card-title">
+                  <div><span>POST-EQ</span><h3 id="masterOutputTitle">OUTPUT</h3></div>
+                  <span id="masterClipLamp" class="clip-lamp">CLIP</span>
+                </div>
+                <label class="master-output-control">
+                  <span>MASTER VOLUME <output id="masterOutputValue">82%</output></span>
+                  <input id="masterOutputControl" type="range" min="0" max="100" value="82" />
+                </label>
+                <div class="master-peak-meter" aria-label="Nivel de pico posterior al volumen master">
+                  <span>POST-EQ PEAK</span>
+                  <div><i id="masterPeakBar"></i></div>
+                  <output id="masterPeakValue">−∞ dBFS</output>
+                </div>
+                <p>La EQ está después del limitador. Si realzas frecuencias puede superar el ceiling; compensa aquí y vigila CLIP.</p>
+              </section>
+            </div>
+          </section>
+
           <div class="mixer-layout" id="mixerControls">
             <div class="channel-strip is-processor-selected" data-channel="kick">
               <span class="channel-number">01</span><strong>KICK</strong><output class="level-output">90</output>
@@ -527,12 +603,12 @@
       </main>
 
       <footer>
-        <span>VOLT/16 · AUDIO r11</span>
+        <span>VOLT/16 · AUDIO r12</span>
         <span>16 STEPS · 4/4 · MONO BASS</span>
       </footer>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js?v=11"></script>
+    <script src="./app.js?v=12"></script>
   </body>
 </html>

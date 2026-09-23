@@ -119,6 +119,64 @@ function setup() {
   return { ...context.api, ctx, callbacks, document, elements };
 }
 
+test("master topology keeps the creative EQ after the optional limiter and before output volume", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+
+  assert.ok(engine.masterInput.connections.includes(engine.masterLimiterDry));
+  assert.ok(engine.masterInput.connections.includes(engine.masterLimiter));
+  assert.deepEqual(engine.masterLimiter.connections, [engine.masterCeiling]);
+  assert.deepEqual(engine.masterCeiling.connections, [engine.masterLimiterWet]);
+  assert.deepEqual(engine.masterLimiterDry.connections, [engine.masterPostLimiter]);
+  assert.deepEqual(engine.masterLimiterWet.connections, [engine.masterPostLimiter]);
+
+  assert.ok(engine.masterPostLimiter.connections.includes(engine.masterEqDry));
+  assert.ok(engine.masterPostLimiter.connections.includes(engine.masterEq.highPass));
+  assert.deepEqual(engine.masterEq.highPass.connections, [engine.masterEq.lowShelf]);
+  assert.deepEqual(engine.masterEq.lowShelf.connections, [engine.masterEq.highShelf]);
+  assert.deepEqual(engine.masterEq.highShelf.connections, [engine.masterEq.lowPass]);
+  assert.deepEqual(engine.masterEq.lowPass.connections, [engine.masterEqWet]);
+  assert.deepEqual(engine.masterEqDry.connections, [engine.masterGain]);
+  assert.deepEqual(engine.masterEqWet.connections, [engine.masterGain]);
+  assert.deepEqual(engine.masterGain.connections, [engine.analyser]);
+  assert.deepEqual(engine.analyser.connections, [ctx.destination]);
+  assert.equal(engine.masterGain.connections.some((node) => node.kind === "compressor"), false,
+    "there must be no hidden post-EQ limiter");
+
+  assert.equal(state.masterProcessor.limiterEnabled, false);
+  assert.equal(engine.masterLimiterDry.gain.value, 1);
+  assert.equal(engine.masterLimiterWet.gain.value, 0);
+  assert.equal(state.masterProcessor.eqEnabled, true);
+  assert.equal(engine.masterEqDry.gain.value, 0);
+  assert.equal(engine.masterEqWet.gain.value, 1);
+
+  const permanentNodes = ctx.nodes.size;
+  state.masterProcessor.limiterEnabled = true;
+  state.masterProcessor.eqEnabled = false;
+  engine.updateMasterProcessor();
+  assert.equal(engine.masterLimiterDry.gain.events.at(-1).value, 0);
+  assert.equal(engine.masterLimiterWet.gain.events.at(-1).value, 1);
+  assert.equal(engine.masterEqDry.gain.events.at(-1).value, 1);
+  assert.equal(engine.masterEqWet.gain.events.at(-1).value, 0);
+  assert.ok(Math.abs(engine.masterCeiling.gain.events.at(-1).value - 10 ** ((-1 - -3) / 20)) < 1e-12,
+    "the pre-EQ ceiling is referenced to the limiter threshold");
+
+  for (let index = 0; index < 4000; index += 1) {
+    ctx.currentTime += 0.003;
+    state.masterProcessor.limiterThreshold = -18 + (index % 37) * 0.5;
+    state.masterProcessor.limiterRelease = 0.04 + (index % 77) * 0.01;
+    state.masterProcessor.limiterCeiling = -6 + (index % 61) * 0.1;
+    state.masterProcessor.lowShelfGain = -15 + (index % 61) * 0.5;
+    state.masterProcessor.highShelfGain = 15 - (index % 61) * 0.5;
+    engine.updateMasterProcessor();
+    [engine.masterLimiter.threshold, engine.masterLimiter.release, engine.masterCeiling.gain,
+      engine.masterEq.lowShelf.gain, engine.masterEq.highShelf.gain].forEach((param) => {
+      assert.ok(param.events.length <= 2, "master automation must stay bounded");
+    });
+  }
+  assert.equal(ctx.nodes.size, permanentNodes, "editing the master must never allocate audio nodes");
+});
+
 test("ten simulated minutes at 190 BPM release all completed percussion and bass nodes", async () => {
   const { state, engine, ctx } = setup();
   await engine.init();

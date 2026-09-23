@@ -57,7 +57,13 @@ node --test tests/*.test.cjs
 
 Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM y un escenario con los cinco efectos activos en los seis canales, cambios repetidos, desactivación/reactivación y PLAY/STOP. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Arquitectura de audio r11
+## Arquitectura de audio r12
+
+- El master sigue exactamente esta ruta: **mezcla completa → limitador opcional → EQ creativo de cuatro filtros → volumen master → medidor → salida**.
+- El limitador arranca apagado para que el master pueda trabajar sin limitar. Al activarlo ofrece threshold, attack, release y ceiling pre-EQ; su bypass cambia mediante una transición corta, sin reconectar el grafo de audio.
+- El EQ master está deliberadamente después del limitador. Sus dos shelves de ±15 dB y los filtros pasa altos/pasa bajos pueden empujar la señal por encima del ceiling para conservar un efecto musical potente. No existe un segundo limitador oculto después del EQ.
+- El volumen master está después del EQ y permite compensar esos realces. El medidor final muestra el pico post-EQ/post-volumen y mantiene encendido el aviso CLIP cuando la salida alcanza 0 dBFS.
+- Los controles del master reutilizan siempre los mismos nodos y sustituyen la automatización anterior; moverlos repetidamente no crea procesadores nuevos ni historiales de eventos sin límite.
 
 - Auto Cutoff usa un único LFO sinusoidal sincronizado al BPM con divisiones 1/1, 1/2, 1/2T, 1/4, 1/4T y 1/8. La modulación es unipolar: abre el filtro desde el cutoff manual sin empujarlo por debajo de su rango útil.
 - El rango se adapta al margen disponible después del cutoff y del contorno de filtro. El LFO y su offset se crean solo al activarlo; cada voz conecta sus dos polos y los desconecta al terminar. STOP, `pagehide` o la desactivación retiran fuentes, conexiones y timers.
@@ -73,4 +79,4 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - El filtro del delay usa una Q sin resonancia para que el feedback máximo permitido no amplifique sucesivamente algunas frecuencias. En los filtros lowpass/highpass de Web Audio, Q se expresa en dB: [especificación de los filtros](https://www.w3.org/TR/webaudio/#filters-characteristics).
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
-Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r11**. Activa Auto Cutoff en SÍNTESIS, recorre sus seis divisiones y mueve AMOUNT, cutoff, contorno y BPM durante PLAY. Comprueba especialmente 1/4T y 1/8, además de varios ciclos ON/OFF y PLAY/STOP. Si hay crujidos, anota dispositivo, navegador, ajuste y momento exacto en que aparecen.
+Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r12**. En MEZCLA, prueba primero el master con LIMITER apagado; aplica realces fuertes con el EQ y compénsalos con VOLUME. Después activa el limitador, recorre threshold, attack, release y ceiling y confirma que el EQ posterior todavía puede encender CLIP. Haz varios ciclos ON/OFF mientras suena: no debe haber saltos ni crujidos. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
