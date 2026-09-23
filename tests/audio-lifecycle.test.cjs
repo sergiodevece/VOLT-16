@@ -294,16 +294,34 @@ test("J-4 is lazy and builds a complete voice only when a key is played", async 
   const voice = engine.startJunoVoice(60, 0.01);
   assert.ok(engine.junoUnit, "the shared modulation and chorus unit must be created on first use");
   assert.equal(engine.junoVoices.size, 1);
-  assert.equal(ctx.nodes.size, baseline + 28, "one 14-node shared unit and one 14-node voice are allocated");
+  assert.equal(ctx.nodes.size, baseline + 30, "one 15-node shared unit and one 15-node voice are allocated");
   assert.equal(voice.saw.type, "sawtooth");
   assert.equal(voice.pulseRamp.type, "sawtooth");
   assert.equal(voice.sub.type, "square");
+  assert.deepEqual(voice.mix.connections, [voice.dcBlocker]);
+  assert.deepEqual(voice.dcBlocker.connections, [voice.highPass]);
   assert.deepEqual(voice.highPass.connections, [voice.filterA]);
   assert.deepEqual(voice.filterA.connections, [voice.filterB]);
   assert.deepEqual(voice.filterB.connections, [voice.amp]);
   assert.ok(engine.junoUnit.pitchDepth.connections.includes(voice.saw.detune));
   assert.ok(engine.junoUnit.filterDepth.connections.includes(voice.filterA.frequency));
   assert.ok(engine.junoUnit.pwmDepth.connections.includes(voice.pulseShaper));
+});
+
+test("J-4 keeps filter modulation above the safe floor and removes PWM DC", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+  state.juno.cutoff = 40;
+  state.juno.lfoFilter = 1;
+  const voice = engine.startJunoVoice(60, 0.01);
+
+  assert.equal(voice.baseCutoff, 120);
+  assert.ok(engine.junoUnit.lfo.connections.includes(engine.junoUnit.filterLfoShape));
+  assert.equal(engine.junoUnit.lfo.connections.includes(engine.junoUnit.filterDepth), false);
+  assert.deepEqual(engine.junoUnit.filterLfoShape.connections, [engine.junoUnit.filterDepth]);
+  assert.equal(voice.dcBlocker.type, "highpass");
+  assert.equal(voice.dcBlocker.frequency.value, 20);
+  assert.deepEqual(voice.mix.connections, [voice.dcBlocker]);
 });
 
 test("J-4 steals the oldest voice with a short fade and keeps four playable voices", async () => {

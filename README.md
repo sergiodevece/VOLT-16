@@ -61,14 +61,14 @@ node --test tests/*.test.cjs
 
 Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM, los cinco efectos activos en los siete canales y pruebas específicas del J-4 y ARP-5: creación diferida, cuatro voces, robo de voz, 4.000 cambios de parámetros, modos, octavas, tresillos, GATE, HOLD y limpieza completa. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Arquitectura de audio r13.1.1
+## Arquitectura de audio r13.1.2
 
 - ARP-5 mantiene separados el teclado físico, el acorde retenido por HOLD y las voces de audio. Así, soltar teclas no corta un acorde retenido y STOP puede retirar todas las voces sin dejar fuentes programadas.
 - Su reloj usa el mismo planificador anticipado del `AudioContext` que batería y bajo, pero conserva un contador propio para representar exactamente divisiones como 1/8T. `GATE` determina la duración como fracción del intervalo, sin temporizadores de interfaz ni saltos de ganancia.
 - UP, DOWN y UP/DOWN ordenan por altura; ORDER conserva el orden de pulsación y RANDOM evita repetir inmediatamente cuando existe más de una nota. El rango añade octavas sin superar MIDI 127.
 - El arpegiador reutiliza un banco fijo de cuatro voces. Tras calentarse no crea nodos por nota: cambia afinación y reprograma envolventes sobre el mismo grafo, evitando picos periódicos de CPU y recolección de memoria.
 
-- El J-4 crea su bloque común de LFO y chorus solo al tocar la primera nota. Cada voz aporta saw, pulse formada por waveshaping, suboscilador, HPF, dos lowpass en cascada y VCA con ADSR.
+- El J-4 crea su bloque común de LFO y chorus solo al tocar la primera nota. Cada voz aporta saw, pulse formada por waveshaping, un bloque DC fijo a 20 Hz, HPF, dos lowpass en cascada y VCA con ADSR. El LFO de filtro se convierte a unipolar antes de modular: puede abrir el filtro, pero no forzarlo por debajo del cutoff manual. El mínimo de cutoff es 120 Hz para que PWM, resonancia y modulación compartan una zona estable.
 - La polifonía útil queda limitada a cuatro voces. La quinta nota roba la voz más antigua mediante un fundido de 9 ms; una voz retirada no puede volver a seleccionarse mientras termina ese fundido.
 - Los parámetros de una voz viva reutilizan sus nodos y sustituyen automatizaciones anteriores. Release conserva el nivel alcanzado antes de caer y STOP elimina voces, moduladores, conexiones y temporizadores.
 - El chorus propio del J-4 es estéreo y se mantiene separado del chorus de envío. El canal 07 pasa después por la misma cadena de procesador, volumen, panorama y FX independientes que el resto de la mesa.

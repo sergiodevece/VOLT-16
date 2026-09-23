@@ -39,6 +39,7 @@ test("activation preserves other apps and other VOLT/16 installations on the sam
     `volt16:${scope}:shell-v13`,
     `volt16:${scope}:shell-v14`,
     `volt16:${scope}:shell-v15`,
+    `volt16:${scope}:shell-v16`,
     "habit-quest-v1",
     "volt16:https://example.github.io/another-volt16/:shell-v5",
   ];
@@ -47,7 +48,7 @@ test("activation preserves other apps and other VOLT/16 installations on the sam
   let activation;
   handlers.activate({ waitUntil: (promise) => { activation = promise; } });
   await activation;
-  assert.deepEqual(removed, [`volt16:${scope}:shell-v5`, `volt16:${scope}:shell-v6`, `volt16:${scope}:shell-v7`, `volt16:${scope}:shell-v8`, `volt16:${scope}:shell-v9`, `volt16:${scope}:shell-v10`, `volt16:${scope}:shell-v11`, `volt16:${scope}:shell-v12`, `volt16:${scope}:shell-v13`, `volt16:${scope}:shell-v14`, `volt16:${scope}:shell-v15`]);
+  assert.deepEqual(removed, [`volt16:${scope}:shell-v5`, `volt16:${scope}:shell-v6`, `volt16:${scope}:shell-v7`, `volt16:${scope}:shell-v8`, `volt16:${scope}:shell-v9`, `volt16:${scope}:shell-v10`, `volt16:${scope}:shell-v11`, `volt16:${scope}:shell-v12`, `volt16:${scope}:shell-v13`, `volt16:${scope}:shell-v14`, `volt16:${scope}:shell-v15`, `volt16:${scope}:shell-v16`]);
 });
 
 test("offline requests read only this installation's cache", async () => {
@@ -64,12 +65,12 @@ test("offline requests read only this installation's cache", async () => {
   let response;
   handlers.fetch({ request, respondWith: (promise) => { response = promise; } });
   assert.equal(await response, cached);
-  assert.deepEqual(opened, [`volt16:${scope}:shell-v16`]);
+  assert.deepEqual(opened, [`volt16:${scope}:shell-v17`]);
 });
 
-test("visible version, application script, and service-worker shell use r13.1.1 consistently", () => {
-  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.1\.1/);
-  assert.match(indexSource, /<script src="\.\/app\.js\?v=16"><\/script>/);
-  assert.match(source, /shell-v16/);
-  assert.match(source, /"\.\/app\.js\?v=16"/);
+test("visible version, application script, and service-worker shell use r13.1.2 consistently", () => {
+  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.1\.2/);
+  assert.match(indexSource, /<script src="\.\/app\.js\?v=17"><\/script>/);
+  assert.match(source, /shell-v17/);
+  assert.match(source, /"\.\/app\.js\?v=17"/);
 });

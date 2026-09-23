@@ -67,6 +67,10 @@ const BASS_FADE_TIME = 0.008;
 const JUNO_POLYPHONY = 4;
 const JUNO_GAIN_FLOOR = 0.0001;
 const JUNO_FADE_TIME = 0.009;
+// The two-pole J-4 filter becomes numerically fragile below this point when
+// resonance, PWM and modulation all meet. Keep the musical low end, but do
+// not let control signals drive the AudioParam into negative frequencies.
+const JUNO_FILTER_FLOOR = 120;
 // Low/highpass Q uses dB in Web Audio: this is linear Q = 1/sqrt(2).
 const NON_RESONANT_Q_DB = -3.01029995664;
 const REVERB_PRESETS = {
@@ -624,6 +628,14 @@ class AudioEngine {
     return curve;
   }
 
+  createJunoUnipolarLfoCurve() {
+    if (this.junoUnipolarLfoCurve) return this.junoUnipolarLfoCurve;
+    const curve = new Float32Array(257);
+    for (let index = 0; index < curve.length; index += 1) curve[index] = index / (curve.length - 1);
+    this.junoUnipolarLfoCurve = curve;
+    return curve;
+  }
+
   createJunoUnit() {
     if (!this.ctx || !this.channels.juno) return null;
     if (this.junoUnit) {
@@ -643,6 +655,7 @@ class AudioEngine {
     const chorusDepthRight = this.ctx.createGain();
     const lfo = this.ctx.createOscillator();
     const pitchDepth = this.ctx.createGain();
+    const filterLfoShape = this.ctx.createWaveShaper();
     const filterDepth = this.ctx.createGain();
     const pwmDepth = this.ctx.createGain();
 
@@ -660,7 +673,8 @@ class AudioEngine {
     chorusDepthLeft.connect(delayLeft.delayTime);
     chorusDepthRight.connect(delayRight.delayTime);
     lfo.connect(pitchDepth);
-    lfo.connect(filterDepth);
+    lfo.connect(filterLfoShape);
+    filterLfoShape.connect(filterDepth);
     lfo.connect(pwmDepth);
     if (pannerLeft.pan) pannerLeft.pan.value = -0.82;
     if (pannerRight.pan) pannerRight.pan.value = 0.82;
@@ -670,13 +684,14 @@ class AudioEngine {
     wet.gain.value = 0;
     chorusLfo.type = "sine";
     lfo.type = "triangle";
+    filterLfoShape.curve = this.createJunoUnipolarLfoCurve();
     chorusLfo.start();
     lfo.start();
 
     this.junoUnit = {
       input, dry, wet, delayLeft, delayRight, pannerLeft, pannerRight,
       chorusLfo, chorusDepthLeft, chorusDepthRight,
-      lfo, pitchDepth, filterDepth, pwmDepth,
+      lfo, pitchDepth, filterLfoShape, filterDepth, pwmDepth,
       cleanupTimer: null, sourcesStopped: false,
     };
     this.updateJunoUnit();
@@ -717,11 +732,11 @@ class AudioEngine {
       this.setSmooth(voice.highPass.frequency, clamp(synth.highPass, 20, maxFrequency));
       this.setSmooth(voice.filterA.Q, synth.resonance * 0.72);
       this.setSmooth(voice.filterB.Q, synth.resonance * 0.34);
-      const target = clamp(synth.cutoff + synth.envAmount * synth.sustain, 50, Math.min(18000, maxFrequency));
+      const target = clamp(synth.cutoff + synth.envAmount * synth.sustain, JUNO_FILTER_FLOOR, Math.min(18000, maxFrequency));
       this.setSmooth(voice.filterA.frequency, target, 0.025);
       this.setSmooth(voice.filterB.frequency, target, 0.025);
-      voice.baseCutoff = clamp(synth.cutoff, 70, Math.min(16000, maxFrequency));
-      voice.peakCutoff = clamp(voice.baseCutoff + synth.envAmount, 50, Math.min(18000, maxFrequency));
+      voice.baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, Math.min(16000, maxFrequency));
+      voice.peakCutoff = clamp(voice.baseCutoff + synth.envAmount, JUNO_FILTER_FLOOR, Math.min(18000, maxFrequency));
     });
   }
 
@@ -762,6 +777,7 @@ class AudioEngine {
     const pulseGain = this.ctx.createGain();
     const subGain = this.ctx.createGain();
     const mix = this.ctx.createGain();
+    const dcBlocker = this.ctx.createBiquadFilter();
     const highPass = this.ctx.createBiquadFilter();
     const filterA = this.ctx.createBiquadFilter();
     const filterB = this.ctx.createBiquadFilter();
@@ -787,6 +803,9 @@ class AudioEngine {
     pulseShaper.curve = this.createJunoPulseCurve();
     pulseShaper.oversample = "2x";
     unit.pwmDepth.connect(pulseShaper);
+    dcBlocker.type = "highpass";
+    dcBlocker.Q.value = NON_RESONANT_Q_DB;
+    dcBlocker.frequency.value = 20;
     highPass.type = "highpass";
     highPass.Q.value = NON_RESONANT_Q_DB;
     highPass.frequency.value = synth.highPass;
@@ -801,8 +820,8 @@ class AudioEngine {
     const decay = Math.max(0.025, synth.decay);
     const peak = accent ? 0.78 : 0.62;
     const sustain = Math.max(JUNO_GAIN_FLOOR, peak * synth.sustain);
-    const baseCutoff = clamp(synth.cutoff, 70, 16000);
-    const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), 50, 18000);
+    const baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, 16000);
+    const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), JUNO_FILTER_FLOOR, 18000);
     amp.gain.value = 0;
     amp.gain.setValueAtTime(0, startAt);
     if (!silent) {
@@ -825,7 +844,8 @@ class AudioEngine {
     pulseGain.connect(mix);
     sub.connect(subGain);
     subGain.connect(mix);
-    mix.connect(highPass);
+    mix.connect(dcBlocker);
+    dcBlocker.connect(highPass);
     highPass.connect(filterA);
     filterA.connect(filterB);
     filterB.connect(amp);
@@ -837,7 +857,7 @@ class AudioEngine {
       releasedAt: silent ? startAt : Infinity, stopAt: Infinity, retiring: false,
       arpActiveUntil: 0,
       saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
-      mix, highPass, filterA, filterB, amp, fade,
+      mix, dcBlocker, highPass, filterA, filterB, amp, fade,
     };
     this.junoVoices.add(voice);
     renderJunoVoiceLeds();
@@ -853,7 +873,7 @@ class AudioEngine {
       try { unit.filterDepth.disconnect(filterB.frequency); } catch { /* detached */ }
       try { unit.pwmDepth.disconnect(pulseShaper); } catch { /* detached */ }
       [saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
-        mix, highPass, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
+        mix, dcBlocker, highPass, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
       this.junoVoices.delete(voice);
       this.junoArpVoicePool = this.junoArpVoicePool.filter((pooled) => pooled !== voice);
       this.junoArpPoolIndex %= Math.max(1, this.junoArpVoicePool.length);
@@ -882,11 +902,11 @@ class AudioEngine {
     voice.amp.gain.exponentialRampToValueAtTime(JUNO_GAIN_FLOOR, releaseAt + release);
     voice.amp.gain.linearRampToValueAtTime(0, stopAt - 0.006);
     const normalized = clamp(level / Math.max(JUNO_GAIN_FLOOR, voice.peak), 0, 1);
-    const cutoff = clamp(voice.baseCutoff + (voice.peakCutoff - voice.baseCutoff) * normalized, 40, 18000);
+    const cutoff = clamp(voice.baseCutoff + (voice.peakCutoff - voice.baseCutoff) * normalized, JUNO_FILTER_FLOOR, 18000);
     [voice.filterA, voice.filterB].forEach((filter) => {
       filter.frequency.cancelScheduledValues(releaseAt);
       filter.frequency.setValueAtTime(cutoff, releaseAt);
-      filter.frequency.exponentialRampToValueAtTime(Math.max(40, voice.baseCutoff), releaseAt + release);
+      filter.frequency.exponentialRampToValueAtTime(Math.max(JUNO_FILTER_FLOOR, voice.baseCutoff), releaseAt + release);
     });
     voice.releasedAt = releaseAt;
     voice.stopAt = stopAt;
@@ -939,8 +959,8 @@ class AudioEngine {
     const decay = Math.max(0.025, synth.decay);
     const peak = accent ? 0.78 : 0.62;
     const sustain = Math.max(JUNO_GAIN_FLOOR, peak * synth.sustain);
-    const baseCutoff = clamp(synth.cutoff, 70, 16000);
-    const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), 50, 18000);
+    const baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, 16000);
+    const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), JUNO_FILTER_FLOOR, 18000);
     const noteOff = startAt + Math.max(0.02, duration);
     const release = Math.max(0.03, synth.release);
     const elapsed = noteOff - startAt;
@@ -976,9 +996,9 @@ class AudioEngine {
       filter.frequency.exponentialRampToValueAtTime(baseCutoff, startAt + attack + decay);
       filter.frequency.cancelScheduledValues(noteOff);
       const normalized = clamp(releaseLevel / Math.max(JUNO_GAIN_FLOOR, peak), 0, 1);
-      const releaseCutoff = clamp(baseCutoff + (peakCutoff - baseCutoff) * normalized, 40, 18000);
+      const releaseCutoff = clamp(baseCutoff + (peakCutoff - baseCutoff) * normalized, JUNO_FILTER_FLOOR, 18000);
       filter.frequency.setValueAtTime(releaseCutoff, noteOff);
-      filter.frequency.exponentialRampToValueAtTime(Math.max(40, baseCutoff), noteOff + release);
+      filter.frequency.exponentialRampToValueAtTime(Math.max(JUNO_FILTER_FLOOR, baseCutoff), noteOff + release);
     });
 
     Object.assign(voice, {
@@ -1032,7 +1052,7 @@ class AudioEngine {
     }
     [unit.input, unit.dry, unit.wet, unit.delayLeft, unit.delayRight,
       unit.pannerLeft, unit.pannerRight, unit.chorusLfo, unit.chorusDepthLeft,
-      unit.chorusDepthRight, unit.lfo, unit.pitchDepth, unit.filterDepth,
+      unit.chorusDepthRight, unit.lfo, unit.pitchDepth, unit.filterLfoShape, unit.filterDepth,
       unit.pwmDepth].forEach((node) => node.disconnect());
     this.junoUnit = null;
   }
