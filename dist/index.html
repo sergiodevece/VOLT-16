@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#171310" />
-    <meta name="description" content="Groovebox móvil con batería analógica, bajo monofónico, efectos, procesado por canal y dos secuenciadores de 16 pasos." />
+    <meta name="description" content="Groovebox móvil con batería analógica, bajo monofónico, polisinte J-4, efectos y procesado por canal." />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="VOLT/16" />
@@ -77,6 +77,7 @@
         <nav class="tabs" role="tablist" aria-label="Secciones de la groovebox">
           <button id="tab-drums" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-drums" data-tab="drums">BATERÍA</button>
           <button id="tab-bass" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-bass" data-tab="bass">BAJO</button>
+          <button id="tab-juno" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-juno" data-tab="juno">JUNO</button>
           <button id="tab-synth" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-synth" data-tab="synth">SÍNTESIS</button>
           <button id="tab-fx" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-fx" data-tab="fx">FX</button>
           <button id="tab-mixer" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" data-tab="mixer">MEZCLA</button>
@@ -139,6 +140,79 @@
             <div class="note-keyboard" id="noteKeyboard" role="group" aria-label="Notas del bajo"></div>
           </section>
           <p class="micro-help">Toca un paso para seleccionarlo. Los controles inferiores modifican su nota, acento y slide. Con PLAY, los cambios se oyen en el patrón; en pausa, puedes preescuchar las notas.</p>
+        </section>
+
+        <section id="panel-juno" class="tab-panel juno-panel" role="tabpanel" aria-labelledby="tab-juno" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">POLYPHONIC SYNTHESIZER</p>
+              <h1>J-4 <span>VOICE FOUNDATION</span></h1>
+            </div>
+            <div class="panel-stamp">4 VOICES · DCO · CHORUS</div>
+          </div>
+
+          <section class="juno-performance" aria-labelledby="junoKeyboardTitle">
+            <div class="juno-status-row">
+              <div>
+                <p class="eyebrow">LIVE PREVIEW</p>
+                <h2 id="junoKeyboardTitle">POLY KEYBOARD</h2>
+              </div>
+              <div class="voice-leds" id="junoVoiceLeds" aria-label="Voces activas"><i></i><i></i><i></i><i></i></div>
+            </div>
+            <div class="juno-keyboard" id="junoKeyboard" role="group" aria-label="Teclado polifónico J-4 de dos octavas"></div>
+            <p class="micro-help">Mantén hasta cuatro notas simultáneas. El secuenciador y el arpegiador llegarán en las siguientes fases.</p>
+          </section>
+
+          <div class="juno-console" id="junoControls">
+            <section class="juno-module dco-module" aria-labelledby="junoDcoTitle">
+              <div class="juno-module-title"><span>DCO</span><h2 id="junoDcoTitle">OSCILLATOR</h2></div>
+              <div class="juno-switch-row">
+                <button class="juno-switch is-on" type="button" data-juno-toggle="saw" aria-pressed="true">SAW</button>
+                <button class="juno-switch is-on" type="button" data-juno-toggle="pulse" aria-pressed="true">PULSE</button>
+              </div>
+              <div class="juno-mode-row" role="radiogroup" aria-label="Octava del DCO">
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-octave="16">16′</button>
+                <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-juno-octave="8">8′</button>
+                <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-octave="4">4′</button>
+              </div>
+              <label class="juno-slider" data-juno-control="sub"><span>SUB <output>22%</output></span><input type="range" min="0" max="75" value="22" /></label>
+              <label class="juno-slider" data-juno-control="pulseWidth"><span>PULSE WIDTH <output>46%</output></span><input type="range" min="8" max="92" value="46" /></label>
+              <label class="juno-slider" data-juno-control="pwmAmount"><span>PWM LFO <output>28%</output></span><input type="range" min="0" max="100" value="28" /></label>
+              <label class="juno-slider" data-juno-control="fineTune"><span>FINE <output>0 ct</output></span><input type="range" min="-50" max="50" value="0" step="1" /></label>
+            </section>
+
+            <section class="juno-module filter-module-juno" aria-labelledby="junoFilterTitle">
+              <div class="juno-module-title"><span>VCF</span><h2 id="junoFilterTitle">24 dB FILTER</h2></div>
+              <label class="juno-slider" data-juno-control="highPass"><span>HIGH PASS <output>90 Hz</output></span><input type="range" min="20" max="1200" value="90" step="5" /></label>
+              <label class="juno-slider" data-juno-control="cutoff"><span>CUTOFF <output>2.8 kHz</output></span><input type="range" min="80" max="16000" value="2800" step="20" /></label>
+              <label class="juno-slider" data-juno-control="resonance"><span>RESONANCE <output>4.5</output></span><input type="range" min="0" max="16" value="4.5" step="0.1" /></label>
+              <label class="juno-slider bipolar-control" data-juno-control="envAmount"><span>ENV AMOUNT <output>+3.2 kHz</output></span><input type="range" min="-7000" max="7000" value="3200" step="50" /></label>
+            </section>
+
+            <section class="juno-module envelope-module" aria-labelledby="junoEnvelopeTitle">
+              <div class="juno-module-title"><span>ENV</span><h2 id="junoEnvelopeTitle">ADSR</h2></div>
+              <label class="juno-slider" data-juno-control="attack"><span>ATTACK <output>18 ms</output></span><input type="range" min="3" max="2000" value="18" step="1" /></label>
+              <label class="juno-slider" data-juno-control="decay"><span>DECAY <output>340 ms</output></span><input type="range" min="25" max="2500" value="340" step="5" /></label>
+              <label class="juno-slider" data-juno-control="sustain"><span>SUSTAIN <output>62%</output></span><input type="range" min="0" max="100" value="62" /></label>
+              <label class="juno-slider" data-juno-control="release"><span>RELEASE <output>720 ms</output></span><input type="range" min="30" max="4000" value="720" step="10" /></label>
+            </section>
+
+            <section class="juno-module modulation-module" aria-labelledby="junoLfoTitle">
+              <div class="juno-module-title"><span>LFO</span><h2 id="junoLfoTitle">MODULATION</h2></div>
+              <label class="juno-slider" data-juno-control="lfoRate"><span>RATE <output>0.72 Hz</output></span><input type="range" min="5" max="1200" value="72" step="1" /></label>
+              <label class="juno-slider" data-juno-control="lfoPitch"><span>PITCH <output>4%</output></span><input type="range" min="0" max="100" value="4" /></label>
+              <label class="juno-slider" data-juno-control="lfoFilter"><span>FILTER <output>16%</output></span><input type="range" min="0" max="100" value="16" /></label>
+              <div class="juno-chorus">
+                <span>STEREO CHORUS</span>
+                <div class="juno-mode-row" role="radiogroup" aria-label="Modo de chorus J-4">
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-chorus="OFF">OFF</button>
+                  <button class="mode-key is-active" type="button" role="radio" aria-checked="true" data-juno-chorus="I">I</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-chorus="II">II</button>
+                  <button class="mode-key" type="button" role="radio" aria-checked="false" data-juno-chorus="I+II">I+II</button>
+                </div>
+              </div>
+            </section>
+          </div>
         </section>
 
         <section id="panel-synth" class="tab-panel" role="tabpanel" aria-labelledby="tab-synth" hidden>
@@ -260,7 +334,7 @@
               <p class="eyebrow">PER-CHANNEL SEND EFFECTS</p>
               <h1>FX-5 <span>LIVE EFFECTS RACK</span></h1>
             </div>
-            <div class="panel-stamp">5 FX · 6 CHANNELS</div>
+            <div class="panel-stamp">5 FX · 7 CHANNELS</div>
           </div>
 
           <section class="fx-channel-router" aria-labelledby="fxChannelTitle">
@@ -276,6 +350,7 @@
               <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="closedHat"><span>04</span><strong>C.HAT</strong><i aria-hidden="true"></i></button>
               <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="openHat"><span>05</span><strong>O.HAT</strong><i aria-hidden="true"></i></button>
               <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="bass"><span>06</span><strong>BASS</strong><i aria-hidden="true"></i></button>
+              <button class="fx-channel-key" type="button" role="radio" aria-checked="false" data-fx-channel="juno"><span>07</span><strong>J-4</strong><i aria-hidden="true"></i></button>
             </div>
           </section>
 
@@ -372,7 +447,7 @@
           <div class="panel-heading">
             <div>
               <p class="eyebrow">OUTPUT SECTION</p>
-              <h1>MX-6 <span>LIVE MIXER</span></h1>
+              <h1>MX-7 <span>LIVE MIXER</span></h1>
             </div>
             <div class="panel-stamp" id="outputStatus">SALIDA DEL DISPOSITIVO</div>
           </div>
@@ -502,6 +577,14 @@
               <button class="processor-key" type="button" data-processor-channel="bass" aria-pressed="false">PROC</button>
               <span class="channel-color bass-color"></span>
             </div>
+            <div class="channel-strip juno-channel" data-channel="juno">
+              <span class="channel-number">07</span><strong>J-4</strong><output class="level-output">68</output>
+              <input class="volume-control" type="range" min="0" max="100" value="68" aria-label="Volumen del polisinte J-4" />
+              <span class="pan-readout">PAN <output>C</output></span>
+              <input class="pan-control" type="range" min="-100" max="100" value="0" aria-label="Panorama del polisinte J-4" />
+              <button class="processor-key" type="button" data-processor-channel="juno" aria-pressed="false">PROC</button>
+              <span class="channel-color juno-color"></span>
+            </div>
           </div>
 
           <section class="processor-panel" id="channelProcessor" aria-labelledby="processorTitle">
@@ -603,12 +686,12 @@
       </main>
 
       <footer>
-        <span>VOLT/16 · AUDIO r12</span>
-        <span>16 STEPS · 4/4 · MONO BASS</span>
+        <span>VOLT/16 · AUDIO r13.0</span>
+        <span>16 STEPS · 4/4 · MONO BASS · 4 VOICE J-4</span>
       </footer>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js?v=12"></script>
+    <script src="./app.js?v=13"></script>
   </body>
 </html>

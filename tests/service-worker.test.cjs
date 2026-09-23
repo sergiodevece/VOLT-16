@@ -35,6 +35,7 @@ test("activation preserves other apps and other VOLT/16 installations on the sam
     `volt16:${scope}:shell-v9`,
     `volt16:${scope}:shell-v10`,
     `volt16:${scope}:shell-v11`,
+    `volt16:${scope}:shell-v12`,
     "habit-quest-v1",
     "volt16:https://example.github.io/another-volt16/:shell-v5",
   ];
@@ -43,7 +44,7 @@ test("activation preserves other apps and other VOLT/16 installations on the sam
   let activation;
   handlers.activate({ waitUntil: (promise) => { activation = promise; } });
   await activation;
-  assert.deepEqual(removed, [`volt16:${scope}:shell-v5`, `volt16:${scope}:shell-v6`, `volt16:${scope}:shell-v7`, `volt16:${scope}:shell-v8`, `volt16:${scope}:shell-v9`, `volt16:${scope}:shell-v10`, `volt16:${scope}:shell-v11`]);
+  assert.deepEqual(removed, [`volt16:${scope}:shell-v5`, `volt16:${scope}:shell-v6`, `volt16:${scope}:shell-v7`, `volt16:${scope}:shell-v8`, `volt16:${scope}:shell-v9`, `volt16:${scope}:shell-v10`, `volt16:${scope}:shell-v11`, `volt16:${scope}:shell-v12`]);
 });
 
 test("offline requests read only this installation's cache", async () => {
@@ -60,12 +61,12 @@ test("offline requests read only this installation's cache", async () => {
   let response;
   handlers.fetch({ request, respondWith: (promise) => { response = promise; } });
   assert.equal(await response, cached);
-  assert.deepEqual(opened, [`volt16:${scope}:shell-v12`]);
+  assert.deepEqual(opened, [`volt16:${scope}:shell-v13`]);
 });
 
-test("visible version, application script, and service-worker shell use r12 consistently", () => {
-  assert.match(indexSource, /VOLT\/16 · AUDIO r12/);
-  assert.match(indexSource, /<script src="\.\/app\.js\?v=12"><\/script>/);
-  assert.match(source, /shell-v12/);
-  assert.match(source, /"\.\/app\.js\?v=12"/);
+test("visible version, application script, and service-worker shell use r13 consistently", () => {
+  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.0/);
+  assert.match(indexSource, /<script src="\.\/app\.js\?v=13"><\/script>/);
+  assert.match(source, /shell-v13/);
+  assert.match(source, /"\.\/app\.js\?v=13"/);
 });

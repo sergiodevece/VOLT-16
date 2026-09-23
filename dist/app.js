@@ -11,6 +11,7 @@ const TRACKS = [
 const CHANNELS = [
   ...TRACKS,
   { id: "bass", label: "BASS", color: "#2e7771" },
+  { id: "juno", label: "J-4", color: "#6f62a8" },
 ];
 
 const FX_NAMES = ["delay", "reverb", "phaser", "chorus", "flanger"];
@@ -56,6 +57,9 @@ const AUTO_CUTOFF_DIVISION_CYCLES = {
 
 const BASS_GAIN_FLOOR = 0.0001;
 const BASS_FADE_TIME = 0.008;
+const JUNO_POLYPHONY = 4;
+const JUNO_GAIN_FLOOR = 0.0001;
+const JUNO_FADE_TIME = 0.009;
 // Low/highpass Q uses dB in Web Audio: this is linear Q = 1/sqrt(2).
 const NON_RESONANT_Q_DB = -3.01029995664;
 const REVERB_PRESETS = {
@@ -120,7 +124,7 @@ const state = {
   selectedFxChannel: "kick",
   drumPattern: cloneDrumPattern(),
   bassPattern: cloneBassPattern(),
-  mutes: Object.fromEntries(TRACKS.map(({ id }) => [id, false])),
+  mutes: Object.fromEntries(CHANNELS.map(({ id }) => [id, false])),
   levels: {
     kick: 0.90,
     snare: 0.76,
@@ -128,6 +132,7 @@ const state = {
     closedHat: 0.58,
     openHat: 0.54,
     bass: 0.78,
+    juno: 0.68,
   },
   pans: {
     kick: 0,
@@ -136,6 +141,7 @@ const state = {
     closedHat: -0.18,
     openHat: 0.18,
     bass: 0,
+    juno: 0,
   },
   drums: {
     kickTune: 48,
@@ -158,6 +164,27 @@ const state = {
     autoCutoffEnabled: false,
     autoCutoffDivision: "1/2",
     autoCutoffAmount: 0.45,
+  },
+  juno: {
+    saw: true,
+    pulse: true,
+    sub: 0.22,
+    octave: 8,
+    fineTune: 0,
+    pulseWidth: 0.46,
+    pwmAmount: 0.28,
+    highPass: 90,
+    cutoff: 2800,
+    resonance: 4.5,
+    envAmount: 3200,
+    attack: 0.018,
+    decay: 0.34,
+    sustain: 0.62,
+    release: 0.72,
+    lfoRate: 0.72,
+    lfoPitch: 0.04,
+    lfoFilter: 0.16,
+    chorusMode: "I",
   },
   fx: {
     enabled: createFxEnabledStates(),
@@ -270,6 +297,11 @@ class AudioEngine {
     this.driveCache = new Map();
     this.smoothParams = new WeakMap();
     this.bassVoices = new Set();
+    this.junoVoices = new Set();
+    this.junoUnit = null;
+    this.junoPulseCurve = null;
+    this.junoPreviewRequests = new Map();
+    this.junoHeldVoices = new Map();
     this.autoCutoff = null;
     this.drumVoices = new Set();
     this.bassPreviewRequest = 0;
@@ -528,6 +560,345 @@ class AudioEngine {
     unit.depth.disconnect();
     unit.offset.disconnect();
     this.autoCutoff = null;
+  }
+
+  createJunoPulseCurve() {
+    if (this.junoPulseCurve) return this.junoPulseCurve;
+    const curve = new Float32Array(512);
+    for (let index = 0; index < curve.length; index += 1) curve[index] = index < curve.length / 2 ? -1 : 1;
+    this.junoPulseCurve = curve;
+    return curve;
+  }
+
+  createJunoUnit() {
+    if (!this.ctx || !this.channels.juno) return null;
+    if (this.junoUnit) {
+      if (this.junoUnit.cleanupTimer !== null) window.clearTimeout(this.junoUnit.cleanupTimer);
+      this.junoUnit.cleanupTimer = null;
+      return this.junoUnit;
+    }
+    const input = this.ctx.createGain();
+    const dry = this.ctx.createGain();
+    const wet = this.ctx.createGain();
+    const delayLeft = this.ctx.createDelay(0.05);
+    const delayRight = this.ctx.createDelay(0.05);
+    const pannerLeft = typeof this.ctx.createStereoPanner === "function" ? this.ctx.createStereoPanner() : this.ctx.createGain();
+    const pannerRight = typeof this.ctx.createStereoPanner === "function" ? this.ctx.createStereoPanner() : this.ctx.createGain();
+    const chorusLfo = this.ctx.createOscillator();
+    const chorusDepthLeft = this.ctx.createGain();
+    const chorusDepthRight = this.ctx.createGain();
+    const lfo = this.ctx.createOscillator();
+    const pitchDepth = this.ctx.createGain();
+    const filterDepth = this.ctx.createGain();
+    const pwmDepth = this.ctx.createGain();
+
+    input.connect(dry);
+    dry.connect(this.channels.juno.input);
+    input.connect(delayLeft);
+    input.connect(delayRight);
+    delayLeft.connect(pannerLeft);
+    delayRight.connect(pannerRight);
+    pannerLeft.connect(wet);
+    pannerRight.connect(wet);
+    wet.connect(this.channels.juno.input);
+    chorusLfo.connect(chorusDepthLeft);
+    chorusLfo.connect(chorusDepthRight);
+    chorusDepthLeft.connect(delayLeft.delayTime);
+    chorusDepthRight.connect(delayRight.delayTime);
+    lfo.connect(pitchDepth);
+    lfo.connect(filterDepth);
+    lfo.connect(pwmDepth);
+    if (pannerLeft.pan) pannerLeft.pan.value = -0.82;
+    if (pannerRight.pan) pannerRight.pan.value = 0.82;
+    delayLeft.delayTime.value = 0.017;
+    delayRight.delayTime.value = 0.023;
+    dry.gain.value = 1;
+    wet.gain.value = 0;
+    chorusLfo.type = "sine";
+    lfo.type = "triangle";
+    chorusLfo.start();
+    lfo.start();
+
+    this.junoUnit = {
+      input, dry, wet, delayLeft, delayRight, pannerLeft, pannerRight,
+      chorusLfo, chorusDepthLeft, chorusDepthRight,
+      lfo, pitchDepth, filterDepth, pwmDepth,
+      cleanupTimer: null, sourcesStopped: false,
+    };
+    this.updateJunoUnit();
+    return this.junoUnit;
+  }
+
+  updateJunoUnit() {
+    const unit = this.junoUnit;
+    if (!unit || !this.ctx) return;
+    const synth = state.juno;
+    const chorus = {
+      OFF: { rate: 0.45, depth: 0, wet: 0, dry: 1 },
+      I: { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 },
+      II: { rate: 0.86, depth: 0.0034, wet: 0.61, dry: 0.78 },
+      "I+II": { rate: 1.12, depth: 0.0046, wet: 0.70, dry: 0.72 },
+    }[synth.chorusMode] || { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 };
+    this.setSmooth(unit.chorusLfo.frequency, chorus.rate, 0.04);
+    this.setSmooth(unit.chorusDepthLeft.gain, chorus.depth, 0.04);
+    this.setSmooth(unit.chorusDepthRight.gain, -chorus.depth, 0.04);
+    this.setSmooth(unit.wet.gain, chorus.wet, 0.035);
+    this.setSmooth(unit.dry.gain, chorus.dry, 0.035);
+    this.setSmooth(unit.lfo.frequency, synth.lfoRate, 0.035);
+    this.setSmooth(unit.pitchDepth.gain, synth.lfoPitch * 38, 0.035);
+    this.setSmooth(unit.filterDepth.gain, synth.lfoFilter * 2400, 0.035);
+    this.setSmooth(unit.pwmDepth.gain, synth.pwmAmount * 0.42, 0.035);
+  }
+
+  updateJunoVoices() {
+    if (!this.ctx) return;
+    this.updateJunoUnit();
+    const synth = state.juno;
+    const maxFrequency = this.ctx.sampleRate * 0.45;
+    this.junoVoices.forEach((voice) => {
+      this.setSmooth(voice.sawGain.gain, synth.saw ? 0.34 : 0, 0.025);
+      this.setSmooth(voice.pulseGain.gain, synth.pulse ? 0.27 : 0, 0.025);
+      this.setSmooth(voice.subGain.gain, synth.sub * 0.24, 0.025);
+      this.setSmooth(voice.pulseBias.offset, (synth.pulseWidth - 0.5) * 1.55, 0.025);
+      this.setSmooth(voice.highPass.frequency, clamp(synth.highPass, 20, maxFrequency));
+      this.setSmooth(voice.filterA.Q, synth.resonance * 0.72);
+      this.setSmooth(voice.filterB.Q, synth.resonance * 0.34);
+      const target = clamp(synth.cutoff + synth.envAmount * synth.sustain, 50, Math.min(18000, maxFrequency));
+      this.setSmooth(voice.filterA.frequency, target, 0.025);
+      this.setSmooth(voice.filterB.frequency, target, 0.025);
+      voice.baseCutoff = clamp(synth.cutoff, 70, Math.min(16000, maxFrequency));
+      voice.peakCutoff = clamp(voice.baseCutoff + synth.envAmount, 50, Math.min(18000, maxFrequency));
+    });
+  }
+
+  junoEnvelopeLevelAt(voice, time) {
+    const elapsed = Math.max(0, time - voice.startAt);
+    if (elapsed < voice.attack) return voice.peak * elapsed / voice.attack;
+    if (elapsed < voice.attack + voice.decay) {
+      const progress = (elapsed - voice.attack) / voice.decay;
+      return voice.peak + (voice.sustain - voice.peak) * progress;
+    }
+    return voice.sustain;
+  }
+
+  startJunoVoice(midi, time, accent = false) {
+    if (!this.ctx) return null;
+    const unit = this.createJunoUnit();
+    const synth = state.juno;
+    const startAt = Math.max(time, this.ctx.currentTime);
+    const availableVoices = [...this.junoVoices].filter((voice) => !voice.retiring);
+    const reusable = availableVoices
+      .filter((voice) => voice.releasedAt <= startAt)
+      .sort((a, b) => a.releasedAt - b.releasedAt || a.startAt - b.startAt)[0];
+    const oldest = availableVoices.sort((a, b) => a.startAt - b.startAt)[0];
+    if (availableVoices.length >= JUNO_POLYPHONY) this.retireJunoVoice(reusable || oldest, startAt);
+
+    const octaveMultiplier = synth.octave === 16 ? 0.5 : synth.octave === 4 ? 2 : 1;
+    const frequency = midiToFrequency(midi) * octaveMultiplier;
+    const detune = synth.fineTune;
+    const saw = this.ctx.createOscillator();
+    const pulseRamp = this.ctx.createOscillator();
+    const pulseBias = this.ctx.createConstantSource();
+    const sub = this.ctx.createOscillator();
+    const sawGain = this.ctx.createGain();
+    const pulseShaper = this.ctx.createWaveShaper();
+    const pulseGain = this.ctx.createGain();
+    const subGain = this.ctx.createGain();
+    const mix = this.ctx.createGain();
+    const highPass = this.ctx.createBiquadFilter();
+    const filterA = this.ctx.createBiquadFilter();
+    const filterB = this.ctx.createBiquadFilter();
+    const amp = this.ctx.createGain();
+    const fade = this.ctx.createGain();
+
+    saw.type = "sawtooth";
+    pulseRamp.type = "sawtooth";
+    sub.type = "square";
+    [saw, pulseRamp].forEach((oscillator) => {
+      oscillator.frequency.value = frequency;
+      oscillator.detune.value = detune;
+      unit.pitchDepth.connect(oscillator.detune);
+    });
+    sub.frequency.value = frequency / 2;
+    sub.detune.value = detune;
+    unit.pitchDepth.connect(sub.detune);
+    sawGain.gain.value = synth.saw ? 0.34 : 0;
+    pulseGain.gain.value = synth.pulse ? 0.27 : 0;
+    subGain.gain.value = synth.sub * 0.24;
+    mix.gain.value = 0.48;
+    pulseBias.offset.value = (synth.pulseWidth - 0.5) * 1.55;
+    pulseShaper.curve = this.createJunoPulseCurve();
+    pulseShaper.oversample = "2x";
+    unit.pwmDepth.connect(pulseShaper);
+    highPass.type = "highpass";
+    highPass.Q.value = NON_RESONANT_Q_DB;
+    highPass.frequency.value = synth.highPass;
+    filterA.type = "lowpass";
+    filterB.type = "lowpass";
+    filterA.Q.value = synth.resonance * 0.72;
+    filterB.Q.value = synth.resonance * 0.34;
+    unit.filterDepth.connect(filterA.frequency);
+    unit.filterDepth.connect(filterB.frequency);
+
+    const attack = Math.max(0.003, synth.attack);
+    const decay = Math.max(0.025, synth.decay);
+    const peak = accent ? 0.78 : 0.62;
+    const sustain = Math.max(JUNO_GAIN_FLOOR, peak * synth.sustain);
+    const baseCutoff = clamp(synth.cutoff, 70, 16000);
+    const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), 50, 18000);
+    amp.gain.value = 0;
+    amp.gain.setValueAtTime(0, startAt);
+    amp.gain.linearRampToValueAtTime(peak, startAt + attack);
+    amp.gain.exponentialRampToValueAtTime(sustain, startAt + attack + decay);
+    [filterA, filterB].forEach((filter) => {
+      filter.frequency.setValueAtTime(baseCutoff, startAt);
+      filter.frequency.linearRampToValueAtTime(peakCutoff, startAt + attack);
+      filter.frequency.exponentialRampToValueAtTime(baseCutoff, startAt + attack + decay);
+    });
+
+    saw.connect(sawGain);
+    sawGain.connect(mix);
+    pulseRamp.connect(pulseShaper);
+    pulseBias.connect(pulseShaper);
+    pulseShaper.connect(pulseGain);
+    pulseGain.connect(mix);
+    sub.connect(subGain);
+    subGain.connect(mix);
+    mix.connect(highPass);
+    highPass.connect(filterA);
+    filterA.connect(filterB);
+    filterB.connect(amp);
+    amp.connect(fade);
+    fade.connect(unit.input);
+
+    const voice = {
+      midi, startAt, attack, decay, peak, sustain, baseCutoff, peakCutoff,
+      releasedAt: Infinity, stopAt: Infinity, retiring: false,
+      saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
+      mix, highPass, filterA, filterB, amp, fade,
+    };
+    this.junoVoices.add(voice);
+    renderJunoVoiceLeds();
+    let ended = 0;
+    const cleanup = () => {
+      ended += 1;
+      if (ended !== 3) return;
+      [saw, pulseRamp, sub].forEach((source) => { source.onended = null; });
+      try { unit.pitchDepth.disconnect(saw.detune); } catch { /* detached */ }
+      try { unit.pitchDepth.disconnect(pulseRamp.detune); } catch { /* detached */ }
+      try { unit.pitchDepth.disconnect(sub.detune); } catch { /* detached */ }
+      try { unit.filterDepth.disconnect(filterA.frequency); } catch { /* detached */ }
+      try { unit.filterDepth.disconnect(filterB.frequency); } catch { /* detached */ }
+      try { unit.pwmDepth.disconnect(pulseShaper); } catch { /* detached */ }
+      [saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
+        mix, highPass, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
+      this.junoVoices.delete(voice);
+      this.junoHeldVoices.forEach((held, key) => { if (held === voice) this.junoHeldVoices.delete(key); });
+      if (this.junoVoices.size === 0 && !state.playing) this.scheduleJunoUnitDisposal();
+      renderJunoVoiceLeds();
+    };
+    saw.onended = cleanup;
+    pulseRamp.onended = cleanup;
+    sub.onended = cleanup;
+    saw.start(startAt);
+    pulseRamp.start(startAt);
+    pulseBias.start(startAt);
+    sub.start(startAt);
+    return voice;
+  }
+
+  releaseJunoVoice(voice, time = this.ctx?.currentTime || 0) {
+    if (!voice || voice.releasedAt !== Infinity || !this.ctx) return;
+    const releaseAt = Math.max(time, this.ctx.currentTime);
+    const release = Math.max(0.03, state.juno.release);
+    const stopAt = releaseAt + release + 0.018;
+    const level = Math.max(JUNO_GAIN_FLOOR, this.junoEnvelopeLevelAt(voice, releaseAt));
+    voice.amp.gain.cancelScheduledValues(releaseAt);
+    voice.amp.gain.setValueAtTime(level, releaseAt);
+    voice.amp.gain.exponentialRampToValueAtTime(JUNO_GAIN_FLOOR, releaseAt + release);
+    voice.amp.gain.linearRampToValueAtTime(0, stopAt - 0.006);
+    const normalized = clamp(level / Math.max(JUNO_GAIN_FLOOR, voice.peak), 0, 1);
+    const cutoff = clamp(voice.baseCutoff + (voice.peakCutoff - voice.baseCutoff) * normalized, 40, 18000);
+    [voice.filterA, voice.filterB].forEach((filter) => {
+      filter.frequency.cancelScheduledValues(releaseAt);
+      filter.frequency.setValueAtTime(cutoff, releaseAt);
+      filter.frequency.exponentialRampToValueAtTime(Math.max(40, voice.baseCutoff), releaseAt + release);
+    });
+    voice.releasedAt = releaseAt;
+    voice.stopAt = stopAt;
+    [voice.saw, voice.pulseRamp, voice.pulseBias, voice.sub].forEach((source) => source.stop(stopAt));
+    renderJunoVoiceLeds();
+  }
+
+  retireJunoVoice(voice, time) {
+    if (!voice || voice.retiring || !this.ctx) return;
+    const fadeAt = Math.max(time, this.ctx.currentTime);
+    const stopAt = fadeAt + JUNO_FADE_TIME + 0.004;
+    voice.fade.gain.cancelScheduledValues(fadeAt);
+    voice.fade.gain.setValueAtTime(1, fadeAt);
+    voice.fade.gain.linearRampToValueAtTime(0, fadeAt + JUNO_FADE_TIME);
+    voice.releasedAt = fadeAt;
+    voice.retiring = true;
+    voice.stopAt = Math.min(voice.stopAt, stopAt);
+    [voice.saw, voice.pulseRamp, voice.pulseBias, voice.sub].forEach((source) => source.stop(voice.stopAt));
+    renderJunoVoiceLeds();
+  }
+
+  scheduleJunoNote(midi, time, duration = 0.5, accent = false) {
+    const voice = this.startJunoVoice(midi, time, accent);
+    if (voice) this.releaseJunoVoice(voice, time + Math.max(0.05, duration));
+    return voice;
+  }
+
+  stopJunoVoices() {
+    this.junoPreviewRequests.clear();
+    this.junoHeldVoices.clear();
+    if (!this.ctx) return;
+    [...this.junoVoices].forEach((voice) => this.retireJunoVoice(voice, this.ctx.currentTime));
+  }
+
+  scheduleJunoUnitDisposal() {
+    const unit = this.junoUnit;
+    if (!unit || unit.cleanupTimer !== null || this.junoVoices.size > 0) return;
+    unit.cleanupTimer = window.setTimeout(() => {
+      unit.cleanupTimer = null;
+      if (this.junoVoices.size === 0 && !state.playing) this.disposeJunoUnit();
+    }, 180);
+  }
+
+  disposeJunoUnit() {
+    const unit = this.junoUnit;
+    if (!unit || this.junoVoices.size > 0) return;
+    if (unit.cleanupTimer !== null) window.clearTimeout(unit.cleanupTimer);
+    if (!unit.sourcesStopped) {
+      unit.chorusLfo.stop(this.ctx?.currentTime || 0);
+      unit.lfo.stop(this.ctx?.currentTime || 0);
+      unit.sourcesStopped = true;
+    }
+    [unit.input, unit.dry, unit.wet, unit.delayLeft, unit.delayRight,
+      unit.pannerLeft, unit.pannerRight, unit.chorusLfo, unit.chorusDepthLeft,
+      unit.chorusDepthRight, unit.lfo, unit.pitchDepth, unit.filterDepth,
+      unit.pwmDepth].forEach((node) => node.disconnect());
+    this.junoUnit = null;
+  }
+
+  async pressJunoKey(midi, pointerId) {
+    const key = `${midi}:${pointerId}`;
+    const request = {};
+    this.junoPreviewRequests.set(key, request);
+    await this.init();
+    if (this.junoPreviewRequests.get(key) !== request) return;
+    FX_NAMES.forEach((effect) => this.updateEffectSend("juno", effect));
+    const voice = this.startJunoVoice(midi, this.ctx.currentTime + 0.008);
+    if (voice) this.junoHeldVoices.set(key, voice);
+  }
+
+  releaseJunoKey(midi, pointerId) {
+    const key = `${midi}:${pointerId}`;
+    this.junoPreviewRequests.delete(key);
+    const voice = this.junoHeldVoices.get(key);
+    this.junoHeldVoices.delete(key);
+    if (voice) this.releaseJunoVoice(voice);
   }
 
   createNoiseBuffer(seconds) {
@@ -1219,9 +1590,11 @@ class AudioEngine {
   stopVoices(disposeEffects = true) {
     this.drumPreviewRequests = {};
     this.stopBassVoices();
+    this.stopJunoVoices();
     if (this.ctx) this.fadeDrumVoices(this.ctx.currentTime);
     if (disposeEffects) {
       this.disposeAutoCutoff();
+      this.scheduleJunoUnitDisposal();
       this.disposeAllChannelDelays();
       this.disposeAllChannelChoruses();
       this.disposeAllChannelPhasers();
@@ -1587,6 +1960,8 @@ const dom = {
   bassGate: document.getElementById("bassGateToggle"),
   bassAccent: document.getElementById("bassAccentToggle"),
   bassSlide: document.getElementById("bassSlideToggle"),
+  junoKeyboard: document.getElementById("junoKeyboard"),
+  junoVoiceLeds: document.getElementById("junoVoiceLeds"),
   fxChannelNumber: document.getElementById("fxChannelNumber"),
   fxChannelName: document.getElementById("fxChannelName"),
   processorChannelNumber: document.getElementById("processorChannelNumber"),
@@ -1721,6 +2096,150 @@ function renderBassEditor() {
     button.setAttribute("aria-pressed", String(active));
   });
   renderNoteKeyboard();
+}
+
+function renderJunoKeyboard() {
+  if (!dom.junoKeyboard) return;
+  dom.junoKeyboard.replaceChildren();
+  for (let midi = 60; midi < 84; midi += 1) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `juno-key${BLACK_NOTES.has(midi % 12) ? " is-black" : ""}`;
+    button.dataset.junoMidi = String(midi);
+    button.textContent = midiToName(midi);
+    button.setAttribute("aria-label", `Tocar ${midiToName(midi)} en J-4`);
+    dom.junoKeyboard.append(button);
+  }
+}
+
+function renderJunoVoiceLeds() {
+  if (!dom.junoVoiceLeds) return;
+  const now = engine.ctx?.currentTime || 0;
+  const active = [...engine.junoVoices].filter((voice) => !voice.retiring && voice.releasedAt > now).length;
+  [...dom.junoVoiceLeds.children].forEach((led, index) => led.classList.toggle("is-on", index < active));
+  dom.junoVoiceLeds.setAttribute("aria-label", `${active} de ${JUNO_POLYPHONY} voces activas`);
+}
+
+function formatJunoOutput(name, rawValue) {
+  const value = Number(rawValue);
+  if (["sub", "pulseWidth", "pwmAmount", "sustain", "lfoPitch", "lfoFilter"].includes(name)) return `${Math.round(value)}%`;
+  if (["attack", "decay", "release"].includes(name)) return `${Math.round(value)} ms`;
+  if (name === "resonance") return value.toFixed(1);
+  if (name === "fineTune") return `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(Math.round(value))} ct`;
+  if (name === "lfoRate") return `${(value / 100).toFixed(2)} Hz`;
+  if (name === "envAmount") {
+    const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+    return `${sign}${Math.abs(value) >= 1000 ? `${(Math.abs(value) / 1000).toFixed(1)} kHz` : `${Math.abs(Math.round(value))} Hz`}`;
+  }
+  return value >= 1000 ? `${(value / 1000).toFixed(1)} kHz` : `${Math.round(value)} Hz`;
+}
+
+function junoStateValue(name, rawValue) {
+  const value = Number(rawValue);
+  if (["attack", "decay", "release"].includes(name)) return value / 1000;
+  if (["sub", "pulseWidth", "pwmAmount", "sustain", "lfoPitch", "lfoFilter"].includes(name)) return value / 100;
+  if (name === "lfoRate") return value / 100;
+  return value;
+}
+
+function renderJunoControls() {
+  document.querySelectorAll("[data-juno-toggle]").forEach((button) => {
+    const enabled = Boolean(state.juno[button.dataset.junoToggle]);
+    button.classList.toggle("is-on", enabled);
+    button.setAttribute("aria-pressed", String(enabled));
+  });
+  document.querySelectorAll("[data-juno-octave]").forEach((button) => {
+    const active = Number(button.dataset.junoOctave) === state.juno.octave;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-juno-chorus]").forEach((button) => {
+    const active = button.dataset.junoChorus === state.juno.chorusMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-juno-control]").forEach((control) => {
+    const name = control.dataset.junoControl;
+    const input = control.querySelector("input");
+    const raw = ["attack", "decay", "release"].includes(name) ? state.juno[name] * 1000
+      : ["sub", "pulseWidth", "pwmAmount", "sustain", "lfoPitch", "lfoFilter"].includes(name) ? state.juno[name] * 100
+        : name === "lfoRate" ? state.juno[name] * 100 : state.juno[name];
+    input.value = String(raw);
+    control.querySelector("output").textContent = formatJunoOutput(name, raw);
+    rangeFill(input);
+  });
+  renderJunoVoiceLeds();
+}
+
+function bindJunoControls() {
+  document.querySelectorAll("[data-juno-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const name = button.dataset.junoToggle;
+      state.juno[name] = !state.juno[name];
+      // Never allow a completely silent DCO by accident.
+      if (!state.juno.saw && !state.juno.pulse && state.juno.sub <= 0) state.juno.pulse = true;
+      engine.updateJunoVoices();
+      renderJunoControls();
+    });
+  });
+  document.querySelectorAll("[data-juno-octave]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.juno.octave = Number(button.dataset.junoOctave);
+      engine.stopJunoVoices();
+      renderJunoControls();
+    });
+  });
+  document.querySelectorAll("[data-juno-chorus]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.juno.chorusMode = button.dataset.junoChorus;
+      engine.updateJunoUnit();
+      renderJunoControls();
+    });
+  });
+  document.querySelectorAll("[data-juno-control]").forEach((control) => {
+    const input = control.querySelector("input");
+    const name = control.dataset.junoControl;
+    input.addEventListener("input", () => {
+      const raw = Number(input.value);
+      state.juno[name] = junoStateValue(name, raw);
+      control.querySelector("output").textContent = formatJunoOutput(name, raw);
+      rangeFill(input);
+      engine.updateJunoVoices();
+    });
+  });
+  if (dom.junoKeyboard) {
+    const release = (button, pointerId) => {
+      if (!button) return;
+      const midi = Number(button.dataset.junoMidi);
+      button.classList.remove("is-held");
+      engine.releaseJunoKey(midi, pointerId);
+    };
+    dom.junoKeyboard.addEventListener("pointerdown", (event) => {
+      const button = event.target.closest(".juno-key");
+      if (!button) return;
+      event.preventDefault();
+      button.setPointerCapture?.(event.pointerId);
+      button.classList.add("is-held");
+      engine.pressJunoKey(Number(button.dataset.junoMidi), event.pointerId).catch(() => {});
+    });
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach((type) => {
+      dom.junoKeyboard.addEventListener(type, (event) => release(event.target.closest(".juno-key"), event.pointerId));
+    });
+    dom.junoKeyboard.addEventListener("keydown", (event) => {
+      const button = event.target.closest(".juno-key");
+      if (!button || !["Enter", " "].includes(event.key) || event.repeat) return;
+      event.preventDefault();
+      button.classList.add("is-held");
+      engine.pressJunoKey(Number(button.dataset.junoMidi), `key-${button.dataset.junoMidi}`).catch(() => {});
+    });
+    dom.junoKeyboard.addEventListener("keyup", (event) => {
+      const button = event.target.closest(".juno-key");
+      if (!button || !["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      release(button, `key-${button.dataset.junoMidi}`);
+    });
+  }
+  renderJunoControls();
 }
 
 function renderPlayhead(step) {
@@ -2639,8 +3158,10 @@ function initialize() {
   renderDrumSequencer();
   renderBassSequencer();
   renderBassEditor();
+  renderJunoKeyboard();
   bindSequencers();
   bindSynthControls();
+  bindJunoControls();
   bindEffects();
   bindChannelProcessor();
   bindMasterProcessor();

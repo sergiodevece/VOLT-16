@@ -454,7 +454,7 @@ main {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   border-bottom: 4px solid var(--orange);
   background: #0d0b09;
 }
@@ -1468,6 +1468,225 @@ h2 {
   color: var(--amber);
 }
 
+.juno-panel {
+  --juno-purple: #7461aa;
+  --juno-light: #b7a7e8;
+  background:
+    linear-gradient(rgba(116, 97, 170, 0.055) 1px, transparent 1px) 0 0 / 100% 26px,
+    linear-gradient(105deg, #d9cba8, #c4b58f 62%, #d4c5a2);
+}
+
+.juno-performance,
+.juno-console {
+  overflow: hidden;
+  border: 2px solid #29251f;
+  border-radius: 5px;
+  background: #211d1a;
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.38), 0 7px 14px rgba(0, 0, 0, 0.2);
+}
+
+.juno-performance {
+  margin-bottom: 15px;
+  padding: 15px;
+  color: var(--cream);
+}
+
+.juno-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 13px;
+}
+
+.juno-status-row h2 {
+  margin-top: 3px;
+  color: #e9ddc2;
+  font-size: 0.92rem;
+  letter-spacing: 0.12em;
+}
+
+.voice-leds {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #554b3d;
+  background: #100e0c;
+}
+
+.voice-leds i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #2e2822;
+  box-shadow: inset 0 1px 3px #000;
+}
+
+.voice-leds i.is-on {
+  background: var(--juno-light);
+  box-shadow: 0 0 10px rgba(183, 167, 232, 0.75);
+}
+
+.juno-keyboard {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(48px, 1fr));
+  gap: 5px;
+  overflow-x: auto;
+  padding: 8px;
+  border: 2px solid #0b0908;
+  background: #100e0c;
+  touch-action: none;
+}
+
+.juno-key {
+  min-height: 82px;
+  border: 1px solid #675e4e;
+  border-radius: 0 0 4px 4px;
+  color: #2a251f;
+  background: linear-gradient(#f0e5cb, #b9aa8c);
+  box-shadow: inset 0 1px #fff8e6, 0 4px 0 #4d4437;
+  font-size: 0.7rem;
+  font-weight: 900;
+  cursor: pointer;
+  user-select: none;
+}
+
+.juno-key.is-black {
+  min-height: 66px;
+  color: #d7c8aa;
+  background: linear-gradient(#403833, #171310);
+  box-shadow: inset 0 1px #63584e, 0 4px 0 #060504;
+}
+
+.juno-key.is-held {
+  color: #fff;
+  background: linear-gradient(#8d76c9, #514176);
+  box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.16), 0 2px 0 #251d38, 0 0 12px rgba(183, 167, 232, 0.45);
+  transform: translateY(2px);
+}
+
+.juno-performance .micro-help {
+  color: #aa9a7d;
+}
+
+.juno-console {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(210px, 1fr));
+  color: var(--cream);
+}
+
+.juno-module {
+  min-width: 0;
+  padding: 0 14px 16px;
+  border-right: 1px solid #51463a;
+  background: linear-gradient(155deg, rgba(116, 97, 170, 0.09), transparent 55%);
+}
+
+.juno-module:last-child {
+  border-right: 0;
+}
+
+.juno-module-title {
+  margin: 0 -14px 14px;
+  padding: 12px 14px;
+  border-bottom: 3px solid var(--juno-purple);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.juno-module-title span {
+  color: var(--juno-light);
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+}
+
+.juno-module-title h2 {
+  margin-top: 3px;
+  color: #eadfca;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+}
+
+.juno-switch-row,
+.juno-mode-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 7px;
+  margin-bottom: 13px;
+}
+
+.juno-mode-row {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.juno-switch {
+  min-height: 42px;
+  border: 1px solid #554b3e;
+  border-radius: 3px;
+  color: #82745e;
+  background: linear-gradient(#3b342c, #201b17);
+  font-size: 0.66rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.juno-switch.is-on {
+  border-color: #8d79c4;
+  color: #f4edff;
+  background: linear-gradient(#7461aa, #433668);
+  box-shadow: 0 0 9px rgba(183, 167, 232, 0.28);
+}
+
+.juno-slider {
+  display: grid;
+  gap: 7px;
+  padding: 10px 0;
+  border-top: 1px solid #443b31;
+}
+
+.juno-slider > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #b7a98b;
+  font-size: 0.64rem;
+  font-weight: 900;
+}
+
+.juno-slider output {
+  color: var(--juno-light);
+  white-space: nowrap;
+}
+
+.juno-slider input {
+  width: 100%;
+}
+
+.juno-slider input[type="range"]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, var(--juno-purple) 0 var(--range-fill), #0a0907 var(--range-fill) 100%);
+}
+
+.juno-slider input[type="range"]::-moz-range-progress {
+  background: var(--juno-purple);
+}
+
+.juno-chorus {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #51463a;
+  color: #b7a98b;
+  font-size: 0.64rem;
+  font-weight: 900;
+}
+
+.juno-chorus .juno-mode-row {
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+}
+
 .master-panel {
   margin-bottom: 18px;
   overflow: hidden;
@@ -2066,10 +2285,33 @@ h2 {
 .clap-color { background: #b34b45; }
 .hat-color { background: #567f7b; }
 .bass-color { background: #2e7771; }
+.juno-color { background: #7461aa; }
 
 .bass-channel {
   color: #efe5cb;
   background: linear-gradient(145deg, #3d5751, #273c38);
+}
+
+.juno-channel {
+  color: #f0e8fb;
+  background: linear-gradient(145deg, #5a4b82, #352c4f);
+}
+
+.juno-channel .pan-readout {
+  color: #d0c3e8;
+}
+
+.juno-channel .processor-key {
+  border-color: #241e35;
+  color: #d8cdec;
+  background: linear-gradient(#6f5d9a, #41345f);
+  box-shadow: 0 3px 0 #21192f;
+}
+
+.juno-channel .processor-key.is-active {
+  border-color: #b7a7e8;
+  color: #fff;
+  background: linear-gradient(#8b76c2, #58437f);
 }
 
 .tone-section {
@@ -2212,6 +2454,18 @@ footer {
 
   .synth-layout {
     grid-template-columns: 1fr;
+  }
+
+  .juno-console {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .juno-module:nth-child(2) {
+    border-right: 0;
+  }
+
+  .juno-module:nth-child(-n + 2) {
+    border-bottom: 1px solid #51463a;
   }
 
   .mixer-layout {
@@ -2404,6 +2658,29 @@ footer {
     margin-inline: -5px;
   }
 
+  .juno-performance {
+    margin-inline: -2px;
+    padding: 12px 8px;
+  }
+
+  .juno-keyboard {
+    grid-template-columns: repeat(12, 52px);
+  }
+
+  .juno-console {
+    grid-template-columns: 1fr;
+  }
+
+  .juno-module,
+  .juno-module:nth-child(2) {
+    border-right: 0;
+    border-bottom: 1px solid #51463a;
+  }
+
+  .juno-module:last-child {
+    border-bottom: 0;
+  }
+
   .synth-layout {
     grid-template-columns: 1fr;
   }
@@ -2432,7 +2709,7 @@ footer {
   }
 
   .mixer-layout {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 7px;
   }
 

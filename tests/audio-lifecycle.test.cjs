@@ -53,7 +53,7 @@ class Param {
 function mockContext(sampleRate = 48000) {
   const ctx = { currentTime: 0, state: "running", sampleRate, nodes: new Set(), sources: new Set(), created: 0, buffers: 0 };
   const make = (kind) => {
-    const node = { kind, connections: [], gain: new Param(), frequency: new Param(350), offset: new Param(0), Q: new Param(),
+    const node = { kind, connections: [], gain: new Param(), frequency: new Param(350), detune: new Param(0), offset: new Param(0), Q: new Param(),
       delayTime: new Param(0), pan: new Param(0), threshold: new Param(), knee: new Param(),
       ratio: new Param(), attack: new Param(), release: new Param(),
       connect(target) { this.connections.push(target); },
@@ -96,7 +96,7 @@ function mockContext(sampleRate = 48000) {
 function setup() {
   const callbacks = new Map(); let nextId = 0;
   const elements = new Map();
-  const element = () => ({ textContent: "", checked: false, hidden: false,
+  const element = () => ({ textContent: "", checked: false, hidden: false, children: [],
     style: { setProperty() {} }, classList: { toggle() {}, remove() {}, contains() { return false; } },
     setAttribute() {}, querySelector() { return element(); }, getContext() { return new Proxy({}, { get: () => () => {} }); },
   });
@@ -280,11 +280,89 @@ test("Auto Cutoff disable fades, can reuse its pending LFO, and then cleans it",
   assert.equal(first.sourcesStopped, true);
 });
 
-test("maximum six-channel FX load survives parameter churn, reuse, PLAY/STOP, and final cleanup", async () => {
+test("J-4 is lazy and builds a complete voice only when a key is played", async () => {
+  const { engine, ctx } = setup();
+  await engine.init();
+  const baseline = ctx.nodes.size;
+  assert.equal(engine.junoUnit, null);
+  assert.equal(engine.junoVoices.size, 0);
+
+  const voice = engine.startJunoVoice(60, 0.01);
+  assert.ok(engine.junoUnit, "the shared modulation and chorus unit must be created on first use");
+  assert.equal(engine.junoVoices.size, 1);
+  assert.equal(ctx.nodes.size, baseline + 28, "one 14-node shared unit and one 14-node voice are allocated");
+  assert.equal(voice.saw.type, "sawtooth");
+  assert.equal(voice.pulseRamp.type, "sawtooth");
+  assert.equal(voice.sub.type, "square");
+  assert.deepEqual(voice.highPass.connections, [voice.filterA]);
+  assert.deepEqual(voice.filterA.connections, [voice.filterB]);
+  assert.deepEqual(voice.filterB.connections, [voice.amp]);
+  assert.ok(engine.junoUnit.pitchDepth.connections.includes(voice.saw.detune));
+  assert.ok(engine.junoUnit.filterDepth.connections.includes(voice.filterA.frequency));
+  assert.ok(engine.junoUnit.pwmDepth.connections.includes(voice.pulseShaper));
+});
+
+test("J-4 steals the oldest voice with a short fade and keeps four playable voices", async () => {
+  const { engine, ctx } = setup();
+  await engine.init();
+  const voices = [60, 64, 67, 71].map((midi, index) => engine.startJunoVoice(midi, 0.01 + index * 0.01));
+  assert.equal([...engine.junoVoices].filter((voice) => !voice.retiring).length, 4);
+
+  const replacement = engine.startJunoVoice(74, 0.06);
+  assert.equal(voices[0].retiring, true);
+  assert.equal(voices[0].releasedAt, 0.06);
+  assert.equal(voices[0].fade.gain.events.at(-1).value, 0);
+  assert.equal(replacement.midi, 74);
+  assert.equal([...engine.junoVoices].filter((voice) => !voice.retiring).length, 4);
+  assert.equal(engine.junoVoices.size, 5, "the stolen voice remains only for its click-free overlap");
+
+  ctx.finishUntil(0.08);
+  assert.equal(engine.junoVoices.size, 4);
+  assert.equal([...engine.junoVoices].filter((voice) => !voice.retiring).length, 4);
+});
+
+test("J-4 parameter churn allocates nothing and STOP releases every node and source", async () => {
+  const { state, engine, ctx, callbacks } = setup();
+  await engine.init();
+  const baselineNodes = ctx.nodes.size;
+  const baselineSources = ctx.sources.size;
+  const voices = [60, 63, 67, 70].map((midi, index) => engine.startJunoVoice(midi, 0.01 + index * 0.01));
+  const allocated = ctx.nodes.size;
+
+  for (let index = 0; index < 4000; index += 1) {
+    ctx.currentTime += 0.003;
+    state.juno.cutoff = 400 + (index % 120) * 80;
+    state.juno.pulseWidth = 0.12 + (index % 75) / 100;
+    state.juno.pwmAmount = (index % 101) / 100;
+    state.juno.lfoRate = 0.08 + (index % 120) / 20;
+    engine.updateJunoVoices();
+    assert.ok(engine.junoUnit.lfo.frequency.events.length <= 2);
+    assert.ok(engine.junoUnit.pwmDepth.gain.events.length <= 2);
+    voices.forEach((voice) => {
+      assert.ok(voice.pulseBias.offset.events.length <= 2);
+      assert.ok(voice.filterA.frequency.events.length <= 2);
+      assert.ok(voice.filterB.frequency.events.length <= 2);
+    });
+  }
+  assert.equal(ctx.nodes.size, allocated, "turning J-4 controls must reuse the live graph");
+
+  engine.stopVoices();
+  ctx.finishUntil(ctx.currentTime + 1);
+  assert.equal(engine.junoVoices.size, 0);
+  assert.ok(callbacks.size > 0, "the shared chorus waits briefly for the release tail");
+  [...callbacks].forEach(([id, callback]) => { callbacks.delete(id); callback(); });
+  ctx.finishUntil(ctx.currentTime + 0.1);
+  assert.equal(engine.junoUnit, null);
+  assert.equal(ctx.nodes.size, baselineNodes);
+  assert.equal(ctx.sources.size, baselineSources);
+  assert.equal(callbacks.size, 0);
+});
+
+test("maximum seven-channel FX load survives parameter churn, reuse, PLAY/STOP, and final cleanup", async () => {
   const api = setup();
   await api.engine.init();
   const { state, engine, ctx, callbacks } = api;
-  const channelIds = ["kick", "snare", "clap", "closedHat", "openHat", "bass"];
+  const channelIds = ["kick", "snare", "clap", "closedHat", "openHat", "bass", "juno"];
   const effectNames = ["delay", "chorus", "phaser", "flanger", "reverb"];
   const registries = [
     engine.channelDelays,
@@ -347,7 +425,7 @@ test("maximum six-channel FX load survives parameter churn, reuse, PLAY/STOP, an
   for (let step = 0; step < 256; step += 1) {
     const now = step * interval;
     ctx.finishUntil(now);
-    for (const track of channelIds.slice(0, -1)) engine.scheduleDrum(track, now + 0.01, 2);
+    for (const track of channelIds.slice(0, -2)) engine.scheduleDrum(track, now + 0.01, 2);
     engine.scheduleBass({ active: true, midi: 24 + step % 12, slide: step % 4 === 0 }, now + 0.01, interval, 24);
     maximumTransient = Math.max(maximumTransient, ctx.nodes.size - fullFxGraph);
   }
