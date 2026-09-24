@@ -167,6 +167,16 @@ const state = {
   bassPattern: cloneBassPattern(),
   mutes: Object.fromEntries(CHANNELS.map(({ id }) => [id, false])),
   directMutes: { drums: false, bass: false, juno: false },
+  snareBreak: {
+    mode: "ONLY",
+    bars: 4,
+    status: "idle",
+    startTime: null,
+    startStep: null,
+    stepsScheduled: 0,
+    totalSteps: 0,
+    activeMode: null,
+  },
   levels: {
     kick: 0.90,
     snare: 0.76,
@@ -248,6 +258,9 @@ const DIRECT_MUTE_CHANNELS = {
   bass: ["bass"],
   juno: ["juno"],
 };
+const SNARE_BREAK_STEPS_PER_BAR = 16;
+const SNARE_BREAK_START_VELOCITY = 50 / 127;
+const SNARE_BREAK_TARGET_VELOCITY = 1;
 
 function isChannelMuted(id) {
   return Boolean(state.mutes[id]
@@ -2138,9 +2151,9 @@ class AudioEngine {
     return this.trackDrumVoice(track, oscillators, [...oscillators, mix, band, high, amp, fade], fade, time + decay + 0.025);
   }
 
-  scheduleDrum(track, time, level) {
+  scheduleDrum(track, time, level, velocityOverride = null) {
     if (!this.ctx || level === 0 || isChannelMuted(track)) return;
-    const velocity = level === 2 ? 1 : 0.72;
+    const velocity = Number.isFinite(velocityOverride) ? clamp(velocityOverride, 0, 1) : level === 2 ? 1 : 0.72;
     if (track === "kick") return this.scheduleKick(time, velocity);
     if (track === "snare") return this.scheduleSnare(time, velocity);
     if (track === "clap") return this.scheduleClap(time, velocity);
@@ -2843,8 +2856,46 @@ function queuePlayhead(step, audioTime) {
   playheadTimers.add(timer);
 }
 
+function resetSnareBreak() {
+  Object.assign(state.snareBreak, {
+    status: "idle", startTime: null, startStep: null, stepsScheduled: 0, totalSteps: 0, activeMode: null,
+  });
+}
+
+function scheduleSnareBreakStep(step, time) {
+  const performance = state.snareBreak;
+  if (performance.status === "armed") {
+    if (step % 4 !== 0) return { suppressPattern: false };
+    performance.status = "active";
+    performance.startTime = time;
+    performance.startStep = step;
+    performance.stepsScheduled = 0;
+    renderDirectControls();
+  }
+  if (performance.status === "cancelRequested" && step % 4 === 0) {
+    resetSnareBreak();
+    renderDirectControls();
+    return { suppressPattern: false };
+  }
+  if (performance.status !== "active" && performance.status !== "cancelRequested") return { suppressPattern: false };
+
+  const progress = performance.totalSteps <= 1 ? 1 : performance.stepsScheduled / (performance.totalSteps - 1);
+  const velocity = SNARE_BREAK_START_VELOCITY + (SNARE_BREAK_TARGET_VELOCITY - SNARE_BREAK_START_VELOCITY) * progress;
+  engine.scheduleDrum("snare", time, 1, velocity);
+  performance.stepsScheduled += 1;
+  const suppressPattern = performance.activeMode === "ONLY";
+  if (performance.stepsScheduled >= performance.totalSteps) {
+    resetSnareBreak();
+    renderDirectControls();
+  }
+  return { suppressPattern };
+}
+
 function scheduleStep(step, time) {
-  TRACKS.forEach(({ id }) => engine.scheduleDrum(id, time, state.drumPattern[id][step]));
+  const snareBreak = scheduleSnareBreakStep(step, time);
+  if (!snareBreak.suppressPattern) {
+    TRACKS.forEach(({ id }) => engine.scheduleDrum(id, time, state.drumPattern[id][step]));
+  }
 
   const bassStep = state.bassPattern[step];
   if (bassStep.active) {
@@ -3001,6 +3052,7 @@ function stopTransport() {
   transportRequest += 1;
   state.playing = false;
   state.starting = false;
+  resetSnareBreak();
   engine.stopVoices();
   if (schedulerTimer) window.clearInterval(schedulerTimer);
   schedulerTimer = null;
@@ -3009,6 +3061,7 @@ function stopTransport() {
   clearPlayhead();
   updateTransportUI();
   renderJunoArp();
+  renderDirectControls();
   releaseWakeLock();
 }
 
@@ -3741,6 +3794,28 @@ function renderDirectControls() {
     button.setAttribute("aria-pressed", String(muted));
     button.querySelector("span").textContent = muted ? "MUTE" : "ON";
   });
+  document.querySelectorAll("[data-snare-break-mode]").forEach((button) => {
+    const active = button.dataset.snareBreakMode === state.snareBreak.mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll("[data-snare-break-bars]").forEach((button) => {
+    const active = Number(button.dataset.snareBreakBars) === state.snareBreak.bars;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  const breakButton = document.getElementById("snareBreakButton");
+  if (breakButton) {
+    const status = state.snareBreak.status;
+    breakButton.classList.toggle("is-armed", status === "armed");
+    breakButton.classList.toggle("is-active", status === "active");
+    breakButton.classList.toggle("is-canceling", status === "cancelRequested");
+    breakButton.setAttribute("aria-pressed", String(status !== "idle"));
+    breakButton.querySelector("small").textContent = status === "armed" ? "ARMADO · PRÓXIMO PASO"
+      : status === "active" ? "ACTIVO · PULSA PARA CANCELAR"
+        : status === "cancelRequested" ? "CANCELACIÓN PENDIENTE"
+          : "ARMAR";
+  }
 }
 
 function toggleDirectMute(group) {
@@ -3758,6 +3833,23 @@ function applyDirectControl(name, rawValue) {
   renderDirectControls();
 }
 
+function requestSnareBreak() {
+  const performance = state.snareBreak;
+  if (!state.playing || !engine.ctx) {
+    showToast("Inicia PLAY para armar BREAK SNARE.");
+    return;
+  }
+  if (performance.status === "idle") {
+    Object.assign(performance, {
+      status: "armed", startTime: null, startStep: null, stepsScheduled: 0,
+      totalSteps: performance.bars * SNARE_BREAK_STEPS_PER_BAR, activeMode: performance.mode,
+    });
+  } else if (performance.status === "armed" || performance.status === "active") {
+    performance.status = "cancelRequested";
+  }
+  renderDirectControls();
+}
+
 function bindDirectControls() {
   document.querySelectorAll("[data-direct-control]").forEach((control) => {
     control.querySelector("input").addEventListener("input", (event) => applyDirectControl(control.dataset.directControl, event.target.value));
@@ -3765,6 +3857,19 @@ function bindDirectControls() {
   document.querySelectorAll("[data-direct-mute]").forEach((button) => {
     button.addEventListener("click", () => toggleDirectMute(button.dataset.directMute));
   });
+  document.querySelectorAll("[data-snare-break-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.snareBreak.mode = button.dataset.snareBreakMode;
+      renderDirectControls();
+    });
+  });
+  document.querySelectorAll("[data-snare-break-bars]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.snareBreak.bars = Number(button.dataset.snareBreakBars);
+      renderDirectControls();
+    });
+  });
+  document.getElementById("snareBreakButton")?.addEventListener("click", requestSnareBreak);
   renderDirectControls();
 }
 

@@ -304,6 +304,27 @@
             <button class="direct-mute" type="button" data-direct-mute="bass" aria-pressed="false">BAJO <span>ON</span></button>
             <button class="direct-mute" type="button" data-direct-mute="juno" aria-pressed="false">J-4 <span>ON</span></button>
           </section>
+          <section class="direct-break" aria-labelledby="directBreakTitle">
+            <div class="direct-break-heading">
+              <span>PERFORMANCE LAYER</span>
+              <h2 id="directBreakTitle">BREAK SNARE</h2>
+            </div>
+            <div class="direct-break-options">
+              <div class="direct-break-choice" role="radiogroup" aria-label="Modo de break de caja">
+                <span>MODO</span>
+                <button class="direct-option is-active" type="button" role="radio" aria-checked="true" data-snare-break-mode="ONLY">ONLY</button>
+                <button class="direct-option" type="button" role="radio" aria-checked="false" data-snare-break-mode="ADD">ADD</button>
+              </div>
+              <div class="direct-break-choice" role="radiogroup" aria-label="Duración de break de caja">
+                <span>DURACIÓN</span>
+                <button class="direct-option" type="button" role="radio" aria-checked="false" data-snare-break-bars="1">1 BAR</button>
+                <button class="direct-option" type="button" role="radio" aria-checked="false" data-snare-break-bars="2">2 BARS</button>
+                <button class="direct-option is-active" type="button" role="radio" aria-checked="true" data-snare-break-bars="4">4 BARS</button>
+                <button class="direct-option" type="button" role="radio" aria-checked="false" data-snare-break-bars="8">8 BARS</button>
+              </div>
+            </div>
+            <button id="snareBreakButton" class="snare-break-button" type="button" aria-pressed="false"><span>BREAK SNARE</span><small>ARMAR</small></button>
+          </section>
           <p class="micro-help">Los mutes hacen fundido corto y mantienen el patrón, transporte y notas retenidas.</p>
         </section>
 

@@ -141,7 +141,7 @@ function setup({ junoControls = [] } = {}) {
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
       queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
-      bindJunoControls, applyDirectControl, toggleDirectMute,
+      bindJunoControls, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
       buildArpSequence, scheduleArpeggiator,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
@@ -761,6 +761,98 @@ test("DIRECTO reuses safe live controls and mutes channels without changing tran
   ["kick", "snare", "clap", "closedHat", "openHat", "bass", "juno"].forEach((id) => {
     assert.equal(engine.channels[id].gain.gain.events.at(-1).value, state.levels[id], `${id} must recover its stored level`);
   });
+});
+
+test("BREAK SNARE starts on the next safe quarter-note boundary and ONLY replaces future pattern drums", async () => {
+  const { state, engine, requestSnareBreak, scheduleStep } = setup();
+  await engine.init();
+  const hits = [];
+  engine.scheduleDrum = (track, time, level, velocity) => { if (level > 0) hits.push({ track, time, level, velocity }); };
+  engine.scheduleBass = () => {};
+  state.playing = true;
+  state.snareBreak.mode = "ONLY";
+  const patterns = JSON.stringify(state.drumPattern);
+  const transport = { bpm: state.bpm, step: state.currentStep, bass: JSON.stringify(state.bassPattern), juno: JSON.stringify(state.juno), mutes: JSON.stringify(state.mutes) };
+
+  requestSnareBreak();
+  assert.equal(state.snareBreak.status, "armed");
+  scheduleStep(5, 3.25);
+  assert.equal(state.snareBreak.status, "armed", "a non-quarter step must leave the break armed");
+  assert.equal(hits.some((hit) => hit.velocity !== undefined), false);
+  scheduleStep(8, 3.375);
+
+  assert.equal(state.snareBreak.status, "active");
+  assert.equal(state.snareBreak.startStep, 8);
+  assert.equal(state.snareBreak.startTime, 3.375);
+  assert.deepEqual(hits.at(-1), { track: "snare", time: 3.375, level: 1, velocity: 50 / 127 });
+  assert.equal(JSON.stringify(state.drumPattern), patterns);
+  assert.equal(state.bpm, transport.bpm);
+  assert.equal(state.currentStep, transport.step);
+  assert.equal(JSON.stringify(state.bassPattern), transport.bass);
+  assert.equal(JSON.stringify(state.juno), transport.juno);
+  assert.equal(JSON.stringify(state.mutes), transport.mutes);
+});
+
+test("BREAK SNARE ADD retains pattern hits and each duration restores them after its exact bar count", async () => {
+  for (const bars of [1, 2, 4, 8]) {
+    const { state, engine, requestSnareBreak, scheduleStep } = setup();
+    await engine.init();
+    const hits = [];
+    engine.scheduleDrum = (track, time, level, velocity) => { if (level > 0) hits.push({ track, time, level, velocity }); };
+    engine.scheduleBass = () => {};
+    state.playing = true;
+    state.snareBreak.mode = "ADD";
+    state.snareBreak.bars = bars;
+    const patterns = JSON.stringify(state.drumPattern);
+    requestSnareBreak();
+
+    const totalSteps = bars * 16;
+    for (let index = 0; index < totalSteps; index += 1) scheduleStep(index % 16, index * 0.1);
+    const breakHits = hits.filter((hit) => hit.track === "snare" && hit.velocity !== undefined);
+    const regularAtFirstStep = Object.entries(state.drumPattern)
+      .filter(([, pattern]) => pattern[0] > 0).length;
+    assert.equal(breakHits.length, totalSteps, `${bars} bars must add one snare per sixteenth`);
+    assert.equal(hits.filter((hit) => hit.time === 0).length, regularAtFirstStep + 1, "ADD keeps normal pattern hits");
+    assert.equal(breakHits[0].velocity, 50 / 127, "break snare must start at MIDI velocity 50");
+    assert.equal(breakHits.at(-1).velocity, 1, "break snare must end at MIDI velocity 127");
+    const midpoint = Math.floor((totalSteps - 1) / 2);
+    assert.ok(Math.abs(breakHits[midpoint].velocity - (50 / 127 + (1 - 50 / 127) * midpoint / (totalSteps - 1))) < 1e-12,
+      "break snare fade must progress uniformly across its duration");
+    assert.equal(state.snareBreak.status, "idle", `${bars} bars must restore automatically`);
+    const beforeRestore = hits.length;
+    scheduleStep(0, totalSteps * 0.1);
+    assert.equal(hits.length - beforeRestore, regularAtFirstStep, "normal pattern resumes on the next sixteenth");
+    assert.equal(JSON.stringify(state.drumPattern), patterns);
+  }
+});
+
+test("BREAK SNARE cancellation takes effect on the next safe quarter-note boundary without persistent growth", async () => {
+  const { state, engine, ctx, callbacks, requestSnareBreak, scheduleStep } = setup();
+  await engine.init();
+  const hits = [];
+  engine.scheduleDrum = (track, time, level, velocity) => { if (level > 0) hits.push({ track, time, level, velocity }); };
+  engine.scheduleBass = () => {};
+  state.playing = true;
+  state.bpm = 190;
+  const nodes = ctx.created;
+  const patterns = JSON.stringify(state.drumPattern);
+  const normalAtStep = (step) => Object.entries(state.drumPattern).filter(([, pattern]) => pattern[step] > 0).length;
+
+  for (let index = 0; index < 80; index += 1) {
+    requestSnareBreak();
+    scheduleStep(0, index * 0.01);
+    requestSnareBreak();
+    const beforePendingCancel = hits.length;
+    scheduleStep(1, index * 0.01 + 0.0025);
+    assert.equal(hits.length - beforePendingCancel, 1, "cancel must keep the break until a quarter-note boundary");
+    const beforeCancel = hits.length;
+    scheduleStep(4, index * 0.01 + 0.005);
+    assert.equal(hits.length - beforeCancel, normalAtStep(4), "cancel restores pattern at the next safe quarter-note boundary");
+    for (const [id, callback] of [...callbacks]) { callbacks.delete(id); callback(); }
+  }
+  assert.equal(ctx.created, nodes, "arming or cancelling must not allocate structural audio nodes");
+  assert.equal(callbacks.size, 0, "break adds no persistent timers");
+  assert.equal(JSON.stringify(state.drumPattern), patterns);
 });
 
 test("J-4 rebases live cutoff without a discontinuity during filter decay", async () => {

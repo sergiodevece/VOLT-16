@@ -587,6 +587,104 @@ main {
   color: #fff0cd;
 }
 
+.direct-break {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+  padding: 18px;
+  border: 2px solid #4d3229;
+  border-bottom-width: 5px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #382720, #19130f);
+}
+
+.direct-break-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.direct-break-heading span,
+.direct-break-choice > span {
+  color: #b7a98b;
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.direct-break-heading h2 {
+  margin: 0;
+  color: #fff0cd;
+  font-size: clamp(1.05rem, 3vw, 1.35rem);
+}
+
+.direct-break-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.direct-break-choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.direct-break-choice > span {
+  width: 100%;
+}
+
+.direct-option {
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid #655044;
+  border-radius: 4px;
+  color: #b7a98b;
+  background: #16110e;
+  font-size: 0.68rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.direct-option.is-active {
+  border-color: #da7b3c;
+  color: #fff0cd;
+  background: linear-gradient(#b4552c, #70301c);
+}
+
+.snare-break-button {
+  min-height: 88px;
+  border: 2px solid #b65032;
+  border-bottom-width: 6px;
+  border-radius: 7px;
+  color: #fff5dd;
+  background: linear-gradient(#d15a38, #7b2d20);
+  box-shadow: inset 0 2px rgba(255, 255, 255, 0.2);
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.snare-break-button span,
+.snare-break-button small {
+  display: block;
+}
+
+.snare-break-button small {
+  margin-top: 7px;
+  color: #ffd3a4;
+  font-size: 0.64rem;
+}
+
+.snare-break-button.is-armed,
+.snare-break-button.is-active,
+.snare-break-button.is-canceling {
+  border-color: #f0a747;
+  background: linear-gradient(#b97b29, #71420d);
+}
+
 .panel-heading {
   display: flex;
   align-items: end;
