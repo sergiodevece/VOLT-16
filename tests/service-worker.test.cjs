@@ -65,12 +65,12 @@ test("offline requests read only this installation's cache", async () => {
   let response;
   handlers.fetch({ request, respondWith: (promise) => { response = promise; } });
   assert.equal(await response, cached);
-  assert.deepEqual(opened, [`volt16:${scope}:shell-v17`]);
+  assert.deepEqual(opened, [`volt16:${scope}:shell-v18`]);
 });
 
-test("visible version, application script, and service-worker shell use r13.1.2 consistently", () => {
-  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.1\.2/);
-  assert.match(indexSource, /<script src="\.\/app\.js\?v=17"><\/script>/);
-  assert.match(source, /shell-v17/);
-  assert.match(source, /"\.\/app\.js\?v=17"/);
+test("visible version, application script, and service-worker shell use r13.1.3 consistently", () => {
+  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.1\.3/);
+  assert.match(indexSource, /<script src="\.\/app\.js\?v=18"><\/script>/);
+  assert.match(source, /shell-v18/);
+  assert.match(source, /"\.\/app\.js\?v=18"/);
 });

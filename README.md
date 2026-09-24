@@ -61,7 +61,7 @@ node --test tests/*.test.cjs
 
 Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM, los cinco efectos activos en los siete canales y pruebas específicas del J-4 y ARP-5: creación diferida, cuatro voces, robo de voz, 4.000 cambios de parámetros, modos, octavas, tresillos, GATE, HOLD y limpieza completa. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Arquitectura de audio r13.1.2
+## Arquitectura de audio r13.1.3
 
 - ARP-5 mantiene separados el teclado físico, el acorde retenido por HOLD y las voces de audio. Así, soltar teclas no corta un acorde retenido y STOP puede retirar todas las voces sin dejar fuentes programadas.
 - Su reloj usa el mismo planificador anticipado del `AudioContext` que batería y bajo, pero conserva un contador propio para representar exactamente divisiones como 1/8T. `GATE` determina la duración como fracción del intervalo, sin temporizadores de interfaz ni saltos de ganancia.
@@ -94,4 +94,4 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - El filtro del delay usa una Q sin resonancia para que el feedback máximo permitido no amplifique sucesivamente algunas frecuencias. En los filtros lowpass/highpass de Web Audio, Q se expresa en dB: [especificación de los filtros](https://www.w3.org/TR/webaudio/#filters-characteristics).
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
-Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.1.1**. En JUNO, activa ARP, mantén un acorde y pulsa PLAY; deja `1/16` funcionando varios minutos y después recorre los cinco modos, las cuatro divisiones y 1–3 octavas. Activa HOLD, suelta el acorde y toca otro: el segundo debe sustituir al primero. Mueve GATE durante la reproducción y comprueba que cambia la articulación sin clics. Después haz varios ciclos PLAY/STOP: no debe quedar ninguna nota, salto ni crujido. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
+Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.1.3**. En JUNO, activa ARP, mantén un acorde y pulsa PLAY; deja `1/16` funcionando varios minutos y después recorre los cinco modos, las cuatro divisiones y 1–3 octavas. Activa HOLD, suelta el acorde y toca otro: el segundo debe sustituir al primero. Mueve GATE durante la reproducción y comprueba que cambia la articulación sin clics. Después haz varios ciclos PLAY/STOP: no debe quedar ninguna nota, salto ni crujido. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
