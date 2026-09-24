@@ -1291,15 +1291,33 @@ class AudioEngine {
     const lfo = this.ctx.createOscillator();
     const lfoDepth = this.ctx.createGain();
     const lfoDepthRight = this.ctx.createGain();
-    send.gain.value = 0;
+    const fx = getChannelFxState(channelId);
+    const enabled = state.fx.enabled[channelId].delay;
+    const delaySeconds = getDelaySeconds(fx);
+    const feedbackAmount = enabled ? clamp(fx.delayFeedback, 0, 0.82) : 0;
+    const pingPong = Boolean(fx.delayPingPong);
+
+    send.gain.value = enabled ? state.fx.sends[channelId].delay : 0;
+    delay.delayTime.value = delaySeconds;
+    delayRight.delayTime.value = delaySeconds;
     tone.type = "lowpass";
     toneRight.type = "lowpass";
     // A resonant filter inside feedback can amplify each repeat even when the
     // feedback knob is below 100%. Keep this loop strictly attenuating.
     tone.Q.value = NON_RESONANT_Q_DB;
     toneRight.Q.value = NON_RESONANT_Q_DB;
+    tone.frequency.value = fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone;
+    toneRight.frequency.value = fx.delayMode === "tape" ? Math.min(fx.delayTone, 6200) : fx.delayTone;
+    feedback.gain.value = pingPong ? 0 : feedbackAmount;
+    crossFeedbackLeft.gain.value = pingPong ? feedbackAmount : 0;
+    crossFeedbackRight.gain.value = pingPong ? feedbackAmount : 0;
+    wet.gain.value = 0.72;
+    if (pannerLeft.pan) pannerLeft.pan.value = pingPong ? -1 : 0;
+    if (pannerRight.pan) pannerRight.pan.value = 1;
     lfo.type = "sine";
     lfo.frequency.value = 0.21;
+    lfoDepth.gain.value = fx.delayMode === "tape" ? 0.0018 : 0;
+    lfoDepthRight.gain.value = fx.delayMode === "tape" ? 0.0018 : 0;
     this.channels[channelId].panner.connect(send);
     send.connect(delay);
     delay.connect(tone);
@@ -1326,7 +1344,6 @@ class AudioEngine {
       wet, pannerLeft, pannerRight, lfo, lfoDepth, lfoDepthRight, cleanupTimer: null, lfoStopped: false,
     };
     this.channelDelays.set(channelId, unit);
-    this.updateDelay(channelId);
     return unit;
   }
 
@@ -1415,9 +1432,15 @@ class AudioEngine {
     const wet = this.ctx.createGain();
     const lfo = this.ctx.createOscillator();
     const depth = this.ctx.createGain();
-    send.gain.value = 0;
+    const fx = getChannelFxState(channelId);
+    const enabled = state.fx.enabled[channelId].chorus;
+
+    send.gain.value = enabled ? state.fx.sends[channelId].chorus : 0;
     delay.delayTime.value = 0.018;
+    wet.gain.value = 0.62;
     lfo.type = "sine";
+    lfo.frequency.value = fx.chorusRate;
+    depth.gain.value = 0.001 + fx.chorusDepth * 0.0065;
     this.channels[channelId].panner.connect(send);
     send.connect(delay);
     delay.connect(wet);
@@ -1428,7 +1451,6 @@ class AudioEngine {
 
     const unit = { channelId, send, delay, wet, lfo, depth, cleanupTimer: null, lfoStopped: false };
     this.channelChoruses.set(channelId, unit);
-    this.updateChorus(channelId);
     return unit;
   }
 
@@ -1491,13 +1513,15 @@ class AudioEngine {
     });
     const wet = this.ctx.createGain();
     const lfo = this.ctx.createOscillator();
-    const depths = filters.map((filter) => {
-      const depth = this.ctx.createGain();
-      lfo.connect(depth);
-      depth.connect(filter.frequency);
-      return depth;
-    });
-    send.gain.value = 0;
+    const depths = filters.map(() => this.ctx.createGain());
+    const fx = getChannelFxState(channelId);
+    const enabled = state.fx.enabled[channelId].phaser;
+
+    send.gain.value = enabled ? state.fx.sends[channelId].phaser : 0;
+    wet.gain.value = 0.62;
+    lfo.type = "sine";
+    lfo.frequency.value = fx.phaserRate;
+    depths.forEach((depth, index) => { depth.gain.value = [260, 470, 780, 1150][index] * fx.phaserDepth; });
     this.channels[channelId].panner.connect(send);
     send.connect(filters[0]);
     filters.forEach((filter, index) => {
@@ -1505,11 +1529,14 @@ class AudioEngine {
     });
     filters.at(-1).connect(wet);
     wet.connect(this.masterInput);
+    depths.forEach((depth, index) => {
+      lfo.connect(depth);
+      depth.connect(filters[index].frequency);
+    });
     lfo.start();
 
     const unit = { channelId, send, filters, wet, lfo, depths, cleanupTimer: null, lfoStopped: false };
     this.channelPhasers.set(channelId, unit);
-    this.updatePhaser(channelId);
     return unit;
   }
 
@@ -1570,9 +1597,16 @@ class AudioEngine {
     const wet = this.ctx.createGain();
     const lfo = this.ctx.createOscillator();
     const depth = this.ctx.createGain();
-    send.gain.value = 0;
+    const fx = getChannelFxState(channelId);
+    const enabled = state.fx.enabled[channelId].flanger;
+
+    send.gain.value = enabled ? state.fx.sends[channelId].flanger : 0;
     delay.delayTime.value = 0.004;
+    feedback.gain.value = enabled ? clamp(fx.flangerFeedback, 0, 0.75) * 0.75 : 0;
+    wet.gain.value = 0.55;
     lfo.type = "sine";
+    lfo.frequency.value = fx.flangerRate;
+    depth.gain.value = 0.0018;
     this.channels[channelId].panner.connect(send);
     send.connect(delay);
     delay.connect(wet);
@@ -1585,7 +1619,6 @@ class AudioEngine {
 
     const unit = { channelId, send, delay, feedback, wet, lfo, depth, cleanupTimer: null, lfoStopped: false };
     this.channelFlangers.set(channelId, unit);
-    this.updateFlanger(channelId);
     return unit;
   }
 
@@ -1795,9 +1828,12 @@ class AudioEngine {
         this.scheduleDelayDisposal(channelId);
         return;
       }
+      const existing = this.channelDelays.has(channelId);
       const unit = this.createChannelDelay(channelId);
-      this.updateDelay(channelId);
-      this.setSmooth(unit.send.gain, state.fx.sends[channelId].delay);
+      if (existing) {
+        this.updateDelay(channelId);
+        this.setSmooth(unit.send.gain, state.fx.sends[channelId].delay);
+      }
       return;
     }
     if (effect === "chorus") {
@@ -1805,9 +1841,12 @@ class AudioEngine {
         this.scheduleChorusDisposal(channelId);
         return;
       }
+      const existing = this.channelChoruses.has(channelId);
       const unit = this.createChannelChorus(channelId);
-      this.updateChorus(channelId);
-      this.setSmooth(unit.send.gain, state.fx.sends[channelId].chorus);
+      if (existing) {
+        this.updateChorus(channelId);
+        this.setSmooth(unit.send.gain, state.fx.sends[channelId].chorus);
+      }
       return;
     }
     if (effect === "phaser") {
@@ -1815,9 +1854,12 @@ class AudioEngine {
         this.schedulePhaserDisposal(channelId);
         return;
       }
+      const existing = this.channelPhasers.has(channelId);
       const unit = this.createChannelPhaser(channelId);
-      this.updatePhaser(channelId);
-      this.setSmooth(unit.send.gain, state.fx.sends[channelId].phaser);
+      if (existing) {
+        this.updatePhaser(channelId);
+        this.setSmooth(unit.send.gain, state.fx.sends[channelId].phaser);
+      }
       return;
     }
     if (effect === "flanger") {
@@ -1825,9 +1867,12 @@ class AudioEngine {
         this.scheduleFlangerDisposal(channelId);
         return;
       }
+      const existing = this.channelFlangers.has(channelId);
       const unit = this.createChannelFlanger(channelId);
-      this.updateFlanger(channelId);
-      this.setSmooth(unit.send.gain, state.fx.sends[channelId].flanger);
+      if (existing) {
+        this.updateFlanger(channelId);
+        this.setSmooth(unit.send.gain, state.fx.sends[channelId].flanger);
+      }
       return;
     }
     if (effect === "reverb") {

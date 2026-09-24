@@ -5,8 +5,11 @@ const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { execFileSync } = require("node:child_process");
 
-const source = fs.readFileSync(path.join(__dirname, "../dist/app.js"), "utf8");
+const source = process.env.VOLT16_TEST_REVISION
+  ? execFileSync("git", ["show", `${process.env.VOLT16_TEST_REVISION}:dist/app.js`], { encoding: "utf8" })
+  : fs.readFileSync(path.join(__dirname, "../dist/app.js"), "utf8");
 
 class Param {
   constructor(value = 1) {
@@ -35,14 +38,23 @@ function mockContext(sampleRate = 48000) {
     nodes: [],
     buffers: [],
     startedSources: [],
+    recordOperations: false,
+    operations: [],
   };
+
+  const snapshot = (node) => ({
+    gain: node?.gain?.value,
+    frequency: node?.frequency?.value,
+    delayTime: node?.delayTime?.value,
+    pan: node?.pan?.value,
+  });
 
   const makeNode = (kind) => {
     const node = {
       kind,
       connections: [],
       gain: new Param(),
-      frequency: new Param(350),
+      frequency: new Param(kind === "oscillator" ? 440 : 350),
       Q: new Param(),
       delayTime: new Param(),
       pan: new Param(),
@@ -52,7 +64,17 @@ function mockContext(sampleRate = 48000) {
       attack: new Param(),
       release: new Param(),
       disconnected: false,
-      connect(target) { this.connections.push(target); return target; },
+      connect(target) {
+        if (ctx.recordOperations) {
+          ctx.operations.push({
+            type: "connect", source: this, target,
+            sourceSnapshot: snapshot(this), targetSnapshot: snapshot(target),
+            targetValue: target instanceof Param ? target.value : undefined,
+          });
+        }
+        this.connections.push(target);
+        return target;
+      },
       disconnect(target) {
         if (target) {
           this.connections = this.connections.filter((connection) => connection !== target);
@@ -61,7 +83,11 @@ function mockContext(sampleRate = 48000) {
         this.connections = [];
         this.disconnected = true;
       },
-      start(time = 0) { this.startAt = time; ctx.startedSources.push(this); },
+      start(time = 0) {
+        if (ctx.recordOperations) ctx.operations.push({ type: "start", source: this, sourceSnapshot: snapshot(this) });
+        this.startAt = time;
+        ctx.startedSources.push(this);
+      },
       stop(time = 0) { this.stopAt = time; this.stopped = true; },
       getByteTimeDomainData(data) { data.fill(128); },
     };
@@ -477,6 +503,79 @@ test("delay instances are lazy and add fourteen active nodes per enabled channel
   assert.equal(engine.channelDelays.size, 7);
 });
 
+test("lazy channel FX initialize safe targets before routing or LFO start", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+  const channelId = "snare";
+  Object.assign(state.fx.channels[channelId], {
+    delayMode: "tape", delayTiming: "free", delayTime: 0.47, delayFeedback: 0.64, delayTone: 9400, delayPingPong: true,
+    chorusRate: 1.37, chorusDepth: 0.73,
+    phaserRate: 0.84, phaserDepth: 0.65,
+    flangerRate: 0.51, flangerFeedback: 0.71,
+  });
+  Object.assign(state.fx.sends[channelId], { delay: 0.31, chorus: 0.42, phaser: 0.28, flanger: 0.35 });
+  Object.assign(state.fx.enabled[channelId], { delay: true, chorus: true, phaser: true, flanger: true });
+  ctx.recordOperations = true;
+  ["delay", "chorus", "phaser", "flanger"].forEach((effect) => engine.updateEffectSend(channelId, effect));
+
+  const connection = (source, target) => {
+    const operation = ctx.operations.find((entry) => entry.type === "connect" && entry.source === source && entry.target === target);
+    assert.ok(operation, `missing ${source.kind} connection`);
+    return operation;
+  };
+  const start = (source) => {
+    const operation = ctx.operations.find((entry) => entry.type === "start" && entry.source === source);
+    assert.ok(operation, `missing ${source.kind} start`);
+    return operation;
+  };
+  const paramsHaveNoAutomation = (params, label) => params.forEach((param) => assert.deepEqual(param.events, [], `${label} must not call setSmooth while creating`));
+
+  const delay = engine.channelDelays.get(channelId);
+  assert.equal(connection(engine.channels[channelId].panner, delay.send).targetSnapshot.gain, 0.31);
+  assert.equal(connection(delay.send, delay.delay).targetSnapshot.delayTime, 0.47);
+  assert.equal(connection(delay.lfo, delay.lfoDepth).sourceSnapshot.frequency, 0.21);
+  assert.equal(connection(delay.lfo, delay.lfoDepth).targetSnapshot.gain, 0.0018);
+  assert.equal(connection(delay.lfoDepth, delay.delay.delayTime).sourceSnapshot.gain, 0.0018);
+  assert.equal(connection(delay.lfoDepth, delay.delay.delayTime).targetValue, 0.47);
+  assert.equal(connection(delay.crossFeedbackLeft, delay.delayRight).sourceSnapshot.gain, 0.64);
+  assert.equal(connection(delay.crossFeedbackRight, delay.delay).sourceSnapshot.gain, 0.64);
+  assert.equal(connection(delay.feedback, delay.delay).sourceSnapshot.gain, 0);
+  assert.equal(start(delay.lfo).sourceSnapshot.frequency, 0.21);
+  [delay.delay.delayTime.value, delay.delayRight.delayTime.value].forEach((time) => assert.ok(time >= 0.055 && time <= 2));
+  paramsHaveNoAutomation([
+    delay.send.gain, delay.delay.delayTime, delay.delayRight.delayTime, delay.feedback.gain,
+    delay.crossFeedbackLeft.gain, delay.crossFeedbackRight.gain, delay.wet.gain, delay.lfo.frequency,
+    delay.lfoDepth.gain, delay.lfoDepthRight.gain,
+  ], "delay");
+
+  const chorus = engine.channelChoruses.get(channelId);
+  assert.equal(connection(chorus.lfo, chorus.depth).sourceSnapshot.frequency, 1.37);
+  assert.equal(connection(chorus.lfo, chorus.depth).targetSnapshot.gain, 0.001 + 0.73 * 0.0065);
+  assert.equal(connection(chorus.depth, chorus.delay.delayTime).sourceSnapshot.gain, 0.001 + 0.73 * 0.0065);
+  assert.equal(start(chorus.lfo).sourceSnapshot.frequency, 1.37);
+  assert.equal(chorus.delay.delayTime.value, 0.018);
+  paramsHaveNoAutomation([chorus.send.gain, chorus.delay.delayTime, chorus.wet.gain, chorus.lfo.frequency, chorus.depth.gain], "chorus");
+
+  const phaser = engine.channelPhasers.get(channelId);
+  phaser.depths.forEach((depth, index) => {
+    const amount = [260, 470, 780, 1150][index] * 0.65;
+    assert.equal(connection(phaser.lfo, depth).sourceSnapshot.frequency, 0.84);
+    assert.equal(connection(phaser.lfo, depth).targetSnapshot.gain, amount);
+    assert.equal(connection(depth, phaser.filters[index].frequency).sourceSnapshot.gain, amount);
+  });
+  assert.equal(start(phaser.lfo).sourceSnapshot.frequency, 0.84);
+  paramsHaveNoAutomation([phaser.send.gain, phaser.wet.gain, phaser.lfo.frequency, ...phaser.depths.map((depth) => depth.gain)], "phaser");
+
+  const flanger = engine.channelFlangers.get(channelId);
+  assert.equal(connection(flanger.lfo, flanger.depth).sourceSnapshot.frequency, 0.51);
+  assert.equal(connection(flanger.lfo, flanger.depth).targetSnapshot.gain, 0.0018);
+  assert.equal(connection(flanger.depth, flanger.delay.delayTime).sourceSnapshot.gain, 0.0018);
+  assert.equal(connection(flanger.feedback, flanger.delay).sourceSnapshot.gain, 0.71 * 0.75);
+  assert.equal(start(flanger.lfo).sourceSnapshot.frequency, 0.51);
+  assert.equal(flanger.delay.delayTime.value, 0.004);
+  paramsHaveNoAutomation([flanger.send.gain, flanger.delay.delayTime, flanger.feedback.gain, flanger.wet.gain, flanger.lfo.frequency, flanger.depth.gain], "flanger");
+});
+
 test("disabling delays preserves a bounded tail and then restores the idle graph", async () => {
   const api = setup();
   await api.engine.init();
@@ -541,6 +640,7 @@ test("rapid channel delay edits keep automation bounded and isolated", async () 
   engine.updateEffectSend("bass", "delay");
   const snare = engine.channelDelays.get("snare");
   const bass = engine.channelDelays.get("bass");
+  const snareEvents = [snare.delay.delayTime.events.length, snare.feedback.gain.events.length];
 
   for (let index = 0; index < 4000; index += 1) {
     ctx.currentTime += 0.003;
@@ -550,8 +650,7 @@ test("rapid channel delay edits keep automation bounded and isolated", async () 
     assert.ok(bass.delay.delayTime.events.length <= 2);
     assert.ok(bass.feedback.gain.events.length <= 2);
   }
-  assert.equal(snare.delay.delayTime.events.length, 2);
-  assert.equal(snare.feedback.gain.events.length, 2);
+  assert.deepEqual([snare.delay.delayTime.events.length, snare.feedback.gain.events.length], snareEvents);
 });
 
 test("STOP and pagehide synchronously dispose delay instances, timers, LFOs, and routes", async () => {
