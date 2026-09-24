@@ -166,6 +166,7 @@ const state = {
   drumPattern: cloneDrumPattern(),
   bassPattern: cloneBassPattern(),
   mutes: Object.fromEntries(CHANNELS.map(({ id }) => [id, false])),
+  directMutes: { drums: false, bass: false, juno: false },
   levels: {
     kick: 0.90,
     snare: 0.76,
@@ -241,6 +242,19 @@ const state = {
     channels: createFxParameterStates(),
   },
 };
+
+const DIRECT_MUTE_CHANNELS = {
+  drums: ["kick", "snare", "clap", "closedHat", "openHat"],
+  bass: ["bass"],
+  juno: ["juno"],
+};
+
+function isChannelMuted(id) {
+  return Boolean(state.mutes[id]
+    || (DIRECT_MUTE_CHANNELS.drums.includes(id) && state.directMutes.drums)
+    || (id === "bass" && state.directMutes.bass)
+    || (id === "juno" && state.directMutes.juno));
+}
 
 function cloneDrumPattern() {
   return Object.fromEntries(Object.entries(BASE_DRUM_PATTERN).map(([key, values]) => [key, [...values]]));
@@ -1790,7 +1804,7 @@ class AudioEngine {
   updateChannel(id) {
     const channel = this.channels[id];
     if (!channel) return;
-    const muted = Boolean(state.mutes[id]);
+    const muted = isChannelMuted(id);
     this.setSmooth(channel.gain.gain, muted ? 0 : state.levels[id]);
     if (channel.panner.pan) this.setSmooth(channel.panner.pan, state.pans[id]);
   }
@@ -2125,7 +2139,7 @@ class AudioEngine {
   }
 
   scheduleDrum(track, time, level) {
-    if (!this.ctx || level === 0 || state.mutes[track]) return;
+    if (!this.ctx || level === 0 || isChannelMuted(track)) return;
     const velocity = level === 2 ? 1 : 0.72;
     if (track === "kick") return this.scheduleKick(time, velocity);
     if (track === "snare") return this.scheduleSnare(time, velocity);
@@ -2611,6 +2625,18 @@ function junoStateValue(name, rawValue) {
   return value;
 }
 
+function applyJunoControl(name, rawValue) {
+  state.juno[name] = junoStateValue(name, rawValue);
+  // Attack defines future envelopes only; FILTER LFO owns only the shared
+  // modulation depth, so neither route touches a voice cutoff envelope.
+  if (name === "lfoFilter") engine.updateJunoUnit();
+  else if (name !== "attack") engine.updateJunoVoices(name);
+}
+
+function applyJunoArpGate(rawValue) {
+  state.juno.arp.gate = Number(rawValue) / 100;
+}
+
 function renderJunoControls() {
   document.querySelectorAll("[data-juno-toggle]").forEach((button) => {
     const enabled = Boolean(state.juno[button.dataset.junoToggle]);
@@ -2680,7 +2706,7 @@ function bindJunoControls() {
   });
   const arpGate = [...document.querySelectorAll("[data-juno-arp-gate]")][0];
   if (arpGate) arpGate.querySelector("input").addEventListener("input", (event) => {
-    state.juno.arp.gate = Number(event.target.value) / 100;
+    applyJunoArpGate(event.target.value);
     renderJunoArp();
   });
   document.querySelectorAll("[data-juno-toggle]").forEach((button) => {
@@ -2712,10 +2738,9 @@ function bindJunoControls() {
     const name = control.dataset.junoControl;
     input.addEventListener("input", () => {
       const raw = Number(input.value);
-      state.juno[name] = junoStateValue(name, raw);
+      applyJunoControl(name, raw);
       control.querySelector("output").textContent = formatJunoOutput(name, raw);
       rangeFill(input);
-      if (name !== "attack") engine.updateJunoVoices(name);
     });
   });
   if (dom.junoKeyboard) {
@@ -3002,6 +3027,7 @@ function switchTab(tabName) {
     panel.classList.toggle("is-active", active);
     panel.hidden = !active;
   });
+  if (tabName === "directo") renderDirectControls();
   updateMeterAnimation();
 }
 
@@ -3146,6 +3172,13 @@ function formatSynthOutput(control, rawValue) {
   return `${Math.round(value)}%`;
 }
 
+function applySynthControl(name, rawValue) {
+  const raw = Number(rawValue);
+  state.synth[name] = ["attack", "decay", "release", "glide"].includes(name) ? raw / 1000
+    : ["sustain", "sub", "drive"].includes(name) ? raw / 100 : raw;
+  if (["cutoff", "envAmount"].includes(name)) engine.updateAutoCutoff();
+}
+
 function bindSynthControls() {
   document.querySelectorAll(".wave-key").forEach((button) => {
     button.addEventListener("click", () => {
@@ -3166,12 +3199,11 @@ function bindSynthControls() {
     const name = control.dataset.control;
     const update = () => {
       const raw = Number(input.value);
-      state.synth[name] = ["attack", "decay", "release", "glide"].includes(name) ? raw / 1000 : ["sustain", "sub", "drive"].includes(name) ? raw / 100 : raw;
+      applySynthControl(name, raw);
       output.textContent = formatSynthOutput(name, raw);
       const percent = (raw - Number(input.min)) / (Number(input.max) - Number(input.min));
       control.style.setProperty("--dial-angle", `${-125 + percent * 250}deg`);
       rangeFill(input);
-      if (["cutoff", "envAmount"].includes(name)) engine.updateAutoCutoff();
     };
     input.addEventListener("input", update);
     update();
@@ -3685,6 +3717,57 @@ function bindTabs() {
   });
 }
 
+function renderDirectControls() {
+  const values = {
+    bassCutoff: state.synth.cutoff,
+    junoCutoff: state.juno.cutoff,
+    junoResonance: state.juno.resonance,
+    junoArpGate: state.juno.arp.gate * 100,
+    junoLfoFilter: state.juno.lfoFilter * 100,
+  };
+  document.querySelectorAll("[data-direct-control]").forEach((control) => {
+    const name = control.dataset.directControl;
+    const raw = values[name];
+    const input = control.querySelector("input");
+    input.value = String(raw);
+    control.querySelector("output").textContent = name === "bassCutoff" ? formatSynthOutput("cutoff", raw)
+      : name === "junoArpGate" ? `${Math.round(raw)}%`
+        : formatJunoOutput(name === "junoCutoff" ? "cutoff" : name === "junoResonance" ? "resonance" : "lfoFilter", raw);
+    rangeFill(input);
+  });
+  document.querySelectorAll("[data-direct-mute]").forEach((button) => {
+    const muted = state.directMutes[button.dataset.directMute];
+    button.classList.toggle("is-muted", muted);
+    button.setAttribute("aria-pressed", String(muted));
+    button.querySelector("span").textContent = muted ? "MUTE" : "ON";
+  });
+}
+
+function toggleDirectMute(group) {
+  state.directMutes[group] = !state.directMutes[group];
+  DIRECT_MUTE_CHANNELS[group].forEach((channelId) => engine.updateChannel(channelId));
+  renderDirectControls();
+}
+
+function applyDirectControl(name, rawValue) {
+  if (name === "bassCutoff") applySynthControl("cutoff", rawValue);
+  else if (name === "junoCutoff") applyJunoControl("cutoff", rawValue);
+  else if (name === "junoResonance") applyJunoControl("resonance", rawValue);
+  else if (name === "junoArpGate") applyJunoArpGate(rawValue);
+  else if (name === "junoLfoFilter") applyJunoControl("lfoFilter", rawValue);
+  renderDirectControls();
+}
+
+function bindDirectControls() {
+  document.querySelectorAll("[data-direct-control]").forEach((control) => {
+    control.querySelector("input").addEventListener("input", (event) => applyDirectControl(control.dataset.directControl, event.target.value));
+  });
+  document.querySelectorAll("[data-direct-mute]").forEach((button) => {
+    button.addEventListener("click", () => toggleDirectMute(button.dataset.directMute));
+  });
+  renderDirectControls();
+}
+
 function drawScopeFrame() {
   if (activeTab !== "synth" || document.visibilityState !== "visible") return;
   const canvas = dom.canvas;
@@ -3772,6 +3855,7 @@ function initialize() {
   bindSequencers();
   bindSynthControls();
   bindJunoControls();
+  bindDirectControls();
   bindEffects();
   bindChannelProcessor();
   bindMasterProcessor();

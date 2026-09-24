@@ -141,7 +141,7 @@ function setup({ junoControls = [] } = {}) {
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
       queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
-      bindJunoControls,
+      bindJunoControls, applyDirectControl, toggleDirectMute,
       buildArpSequence, scheduleArpeggiator,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
@@ -715,6 +715,52 @@ test("J-4 non-filter controls preserve active cutoff automation", async () => {
 
   assert.deepEqual(voice.filterA.frequency.events, before);
   assert.deepEqual(voice.filterB.frequency.events, before);
+});
+
+test("DIRECTO reuses safe live controls and mutes channels without changing transport or allocating nodes", async () => {
+  const { state, engine, ctx, applyDirectControl, toggleDirectMute } = setup();
+  await engine.init();
+  const voice = engine.startJunoVoice(60, ctx.currentTime + 0.01);
+  const cutoffEvents = voice.filterA.frequency.events.slice();
+  const patterns = { drums: JSON.stringify(state.drumPattern), bass: JSON.stringify(state.bassPattern) };
+  state.playing = true;
+  state.currentStep = 9;
+  const nodes = ctx.created;
+
+  applyDirectControl("bassCutoff", 1760);
+  applyDirectControl("junoCutoff", 4300);
+  applyDirectControl("junoResonance", 8.2);
+  applyDirectControl("junoArpGate", 53);
+  const eventsAfterCutoff = voice.filterA.frequency.events.slice();
+  applyDirectControl("junoLfoFilter", 71);
+
+  assert.equal(state.synth.cutoff, 1760);
+  assert.equal(state.juno.cutoff, 4300);
+  assert.equal(state.juno.resonance, 8.2);
+  assert.equal(state.juno.arp.gate, 0.53);
+  assert.equal(state.juno.lfoFilter, 0.71);
+  assert.equal(engine.junoUnit.filterDepth.gain.events.at(-1).value, 0.71 * 2400);
+  assert.deepEqual(voice.filterA.frequency.events, eventsAfterCutoff, "FILTER LFO must not alter an active cutoff envelope");
+  assert.notDeepEqual(eventsAfterCutoff, cutoffEvents, "DIRECTO cutoff must use the live cutoff rebase path");
+
+  toggleDirectMute("drums");
+  toggleDirectMute("bass");
+  toggleDirectMute("juno");
+  assert.equal(ctx.created, nodes, "mute must not allocate audio nodes");
+  assert.equal(state.playing, true);
+  assert.equal(state.currentStep, 9);
+  assert.equal(JSON.stringify(state.drumPattern), patterns.drums);
+  assert.equal(JSON.stringify(state.bassPattern), patterns.bass);
+  ["kick", "snare", "clap", "closedHat", "openHat", "bass", "juno"].forEach((id) => {
+    assert.equal(engine.channels[id].gain.gain.events.at(-1).value, 0, `${id} must fade to mute`);
+  });
+
+  toggleDirectMute("drums");
+  toggleDirectMute("bass");
+  toggleDirectMute("juno");
+  ["kick", "snare", "clap", "closedHat", "openHat", "bass", "juno"].forEach((id) => {
+    assert.equal(engine.channels[id].gain.gain.events.at(-1).value, state.levels[id], `${id} must recover its stored level`);
+  });
 });
 
 test("J-4 rebases live cutoff without a discontinuity during filter decay", async () => {

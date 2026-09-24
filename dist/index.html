@@ -81,6 +81,7 @@
           <button id="tab-synth" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-synth" data-tab="synth">SÍNTESIS</button>
           <button id="tab-fx" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-fx" data-tab="fx">FX</button>
           <button id="tab-mixer" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" data-tab="mixer">MEZCLA</button>
+          <button id="tab-directo" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-directo" data-tab="directo">DIRECTO</button>
         </nav>
 
         <section id="panel-drums" class="tab-panel is-active" role="tabpanel" aria-labelledby="tab-drums">
@@ -264,6 +265,46 @@
               </div>
             </section>
           </div>
+        </section>
+
+        <section id="panel-directo" class="tab-panel direct-panel" role="tabpanel" aria-labelledby="tab-directo" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">LIVE PERFORMANCE</p>
+              <h1>DIRECTO <span>CONTROLES ESENCIALES</span></h1>
+            </div>
+            <div class="panel-stamp">TACTILE PERFORMANCE</div>
+          </div>
+
+          <section class="direct-controls" aria-label="Controles directos">
+            <label class="direct-control direct-control-bass" data-direct-control="bassCutoff">
+              <span>BAJO <strong>CUTOFF</strong><output>900 Hz</output></span>
+              <input type="range" min="90" max="6000" value="900" step="10" aria-label="Cutoff del bajo" />
+            </label>
+            <label class="direct-control direct-control-juno" data-direct-control="junoCutoff">
+              <span>J-4 <strong>CUTOFF</strong><output>2.8 kHz</output></span>
+              <input type="range" min="120" max="16000" value="2800" step="20" aria-label="Cutoff del J-4" />
+            </label>
+            <label class="direct-control direct-control-juno" data-direct-control="junoResonance">
+              <span>J-4 <strong>RESONANCE</strong><output>4.5</output></span>
+              <input type="range" min="0" max="16" value="4.5" step="0.1" aria-label="Resonancia del J-4" />
+            </label>
+            <label class="direct-control direct-control-juno" data-direct-control="junoArpGate">
+              <span>J-4 ARP <strong>GATE</strong><output>72%</output></span>
+              <input type="range" min="20" max="95" value="72" step="1" aria-label="Gate del arpegiador J-4" />
+            </label>
+            <label class="direct-control direct-control-juno" data-direct-control="junoLfoFilter">
+              <span>J-4 <strong>FILTER LFO</strong><output>16%</output></span>
+              <input type="range" min="0" max="100" value="16" step="1" aria-label="Profundidad de LFO de filtro J-4" />
+            </label>
+          </section>
+
+          <section class="direct-mutes" aria-label="Mutes de directo">
+            <button class="direct-mute" type="button" data-direct-mute="drums" aria-pressed="false">BATERÍA <span>ON</span></button>
+            <button class="direct-mute" type="button" data-direct-mute="bass" aria-pressed="false">BAJO <span>ON</span></button>
+            <button class="direct-mute" type="button" data-direct-mute="juno" aria-pressed="false">J-4 <span>ON</span></button>
+          </section>
+          <p class="micro-help">Los mutes hacen fundido corto y mantienen el patrón, transporte y notas retenidas.</p>
         </section>
 
         <section id="panel-synth" class="tab-panel" role="tabpanel" aria-labelledby="tab-synth" hidden>
