@@ -14,7 +14,7 @@ const source = process.env.VOLT16_TEST_REVISION
 // Instrument the real engine. These are lifecycle/automation simulations, not
 // measurements of a browser's heap, audio thread, or audible buffer underruns.
 class Param {
-  constructor(value = 1) { this.value = value; this.events = []; this.calls = 0; }
+  constructor(value = 1) { this.value = value; this.events = []; this.calls = 0; this.cancelledAt = []; }
   event(type, value, time, tau) {
     assert.ok(Number.isFinite(value) && Number.isFinite(time));
     this.events.push({ type, value, time, tau });
@@ -24,7 +24,7 @@ class Param {
   setTargetAtTime(v, t, tau) { this.event("target", v, t, tau); }
   linearRampToValueAtTime(v, t) { this.event("linear", v, t); }
   exponentialRampToValueAtTime(v, t) { this.event("exponential", v, t); }
-  cancelScheduledValues(t) { this.events = this.events.filter((e) => e.time < t); }
+  cancelScheduledValues(t) { this.cancelledAt.push(t); this.events = this.events.filter((e) => e.time < t); }
   valueAt(t) {
     let value = this.value;
     let previous = null;
@@ -540,6 +540,199 @@ test("J-4 keeps filter modulation above the safe floor and removes PWM DC", asyn
   assert.deepEqual(voice.mix.connections, [voice.dcBlocker]);
 });
 
+test("J-4 uses one ADSR filter envelope and releases from its instantaneous value", async () => {
+  for (const phase of ["attack", "decay", "sustain"]) {
+    const { state, engine, ctx } = setup();
+    await engine.init();
+    Object.assign(state.juno, {
+      attack: 0.2, decay: 0.3, sustain: 0.4, release: 0.25,
+      cutoff: 1000, envAmount: 3000,
+    });
+    const voice = engine.startJunoVoice(60, 0.01);
+    const releaseAt = phase === "attack" ? 0.11 : phase === "decay" ? 0.31 : 0.62;
+    const expectedAmp = engine.junoEnvelopeLevelAt(voice, releaseAt);
+    const expectedCutoff = engine.junoFilterEnvelopeValueAt(voice, releaseAt);
+    assert.equal(voice.filterSustainCutoff, 2200, "filter sustain follows the visible ADSR sustain control");
+    assert.equal(voice.filterA.frequency.events.at(-1).value, 2200, "filter decay ends at sustain, not base cutoff");
+
+    ctx.currentTime = releaseAt;
+    engine.releaseJunoVoice(voice, releaseAt);
+
+    const ampAtRelease = voice.amp.gain.events.find((event) => event.type === "set" && event.time === releaseAt);
+    const filterAtRelease = voice.filterA.frequency.events.find((event) => event.type === "set" && event.time === releaseAt);
+    assert.ok(Math.abs(ampAtRelease.value - expectedAmp) < 1e-12, `${phase} release keeps amp continuity`);
+    assert.ok(Math.abs(filterAtRelease.value - expectedCutoff) < 1e-12, `${phase} release keeps cutoff continuity`);
+    assert.equal(voice.filterA.frequency.events.at(-1).value, voice.baseCutoff, "release returns the filter to base cutoff");
+  }
+});
+
+test("J-4 ARP truncates ADSR segments at every gate without post-note-off decay", async () => {
+  const cases = [
+    { bpm: 120, division: "1/8", gate: 0.2 },
+    { bpm: 120, division: "1/8", gate: 0.5 },
+    { bpm: 96, division: "1/4", gate: 0.95 },
+  ];
+  for (const { bpm, division, gate } of cases) {
+    const { state, engine } = setup();
+    await engine.init();
+    Object.assign(state.juno, { attack: 0.04, decay: 0.12, sustain: 0.55, release: 0.2 });
+    state.bpm = bpm;
+    state.juno.arp.division = division;
+    const interval = 60 / bpm * ({ "1/4": 1, "1/8": 0.5, "1/8T": 1 / 3, "1/16": 0.25 }[division]);
+    const startAt = 0.01;
+    const voice = engine.scheduleJunoArpNote(60, startAt, interval * gate, false, interval);
+    const noteOff = startAt + interval * gate;
+    const decayEnd = startAt + voice.attack + voice.decay;
+    const tailEvents = (param) => param.events.filter((event) => event.time > noteOff && event.time < noteOff + state.juno.release);
+
+    assert.ok(Math.abs(voice.releasedAt - noteOff) < 1e-12, `${division} gate ${gate} schedules its exact note-off`);
+    assert.equal(voice.amp.gain.cancelledAt.some((time) => time === noteOff), false, "ARP never cancels amp decay at note-off");
+    assert.equal(voice.filterA.frequency.cancelledAt.some((time) => time === noteOff), false, "ARP never cancels filter decay at note-off");
+    assert.deepEqual(tailEvents(voice.amp.gain), [], "ARP leaves no cancelled decay endpoint after note-off");
+    assert.deepEqual(tailEvents(voice.filterA.frequency), [], "filter envelope leaves no cancelled decay endpoint after note-off");
+    if (decayEnd > noteOff) {
+      assert.equal(voice.amp.gain.events.some((event) => event.time === decayEnd && event.value === voice.sustain), false);
+      assert.equal(voice.filterA.frequency.events.some((event) => event.time === decayEnd && event.value === voice.filterSustainCutoff), false);
+    } else {
+      assert.ok(voice.amp.gain.events.some((event) => event.time === decayEnd && event.value === voice.sustain));
+      assert.ok(voice.filterA.frequency.events.some((event) => event.time === decayEnd && event.value === voice.filterSustainCutoff));
+    }
+  }
+});
+
+test("J-4 ARP caps each release before its four-voice reuse at 190 BPM", async () => {
+  const divisions = { "1/8": 0.5, "1/8T": 1 / 3, "1/16": 0.25 };
+  const margin = 0.006;
+  for (const [division, beats] of Object.entries(divisions)) {
+    for (const gate of [0.2, 0.5, 0.95]) {
+      const releaseInput = { value: "720", style: { setProperty() {} }, addEventListener() {} };
+      const releaseControl = {
+        dataset: { junoControl: "release" },
+        querySelector(selector) { return selector === "input" ? releaseInput : { textContent: "" }; },
+      };
+      const { state, engine } = setup({ junoControls: [releaseControl] });
+      await engine.init();
+      Object.assign(state.juno, { attack: 0.018, decay: 0.34, sustain: 0.62, release: 0.72 });
+      state.bpm = 190;
+      state.juno.arp.division = division;
+      state.juno.arp.gate = gate;
+      const requestedRelease = state.juno.release;
+      const interval = 60 / state.bpm * beats;
+      const startAt = 0.1;
+      const scheduled = [];
+
+      for (let index = 0; index < 4; index += 1) {
+        const voice = engine.scheduleJunoArpNote(60 + index, startAt + index * interval, interval * gate, false, interval);
+        scheduled.push({
+          voice,
+          startAt: voice.startAt,
+          noteOff: voice.releasedAt,
+          effectiveRelease: voice.effectiveArpRelease,
+          availableRelease: voice.arpAvailableRelease,
+          reuseAt: voice.arpReuseAt,
+          ampEvents: structuredClone(voice.amp.gain.events),
+          filterEvents: structuredClone(voice.filterA.frequency.events),
+        });
+      }
+
+      assert.equal(engine.junoArpVoicePool.length, 4, "the fixed pool is warm before reuse");
+      for (const note of scheduled) {
+        const expectedReuseAt = note.startAt + interval * engine.junoArpVoicePool.length;
+        const expectedAvailable = Math.max(0, expectedReuseAt - note.noteOff - margin);
+        assert.ok(Number.isFinite(note.effectiveRelease) && note.effectiveRelease >= 0, "effective release is finite and non-negative");
+        assert.ok(Number.isFinite(note.availableRelease) && note.availableRelease >= 0, "available release is finite and non-negative");
+        assert.ok(note.effectiveRelease <= expectedAvailable + 1e-12, "release cannot reach the next reuse");
+        assert.ok(note.effectiveRelease <= requestedRelease, "ARP never extends the requested release");
+        assert.ok(note.reuseAt <= expectedReuseAt + 1e-12, "reuse estimate uses the real warm-pool size");
+        assert.ok(note.noteOff + note.effectiveRelease <= expectedReuseAt - margin + 1e-12,
+          "arpActiveUntil finishes before the retrigger fade starts");
+        assert.equal(note.ampEvents.some((event) => event.time > expectedReuseAt - margin + 1e-12), false,
+          "no old amp event survives into the next reuse");
+        assert.equal(note.filterEvents.some((event) => event.time > expectedReuseAt - margin + 1e-12), false,
+          "no old cutoff event survives into the next reuse");
+      }
+
+      const first = scheduled[0];
+      const fadeAt = first.reuseAt - margin;
+      assert.ok(Math.abs(first.voice.amp.gain.valueAt(fadeAt) - 0.0001) < 1e-12,
+        "the amplitude tail reaches its safe floor before fade-out");
+      assert.equal(engine.junoFilterEnvelopeValueAt(first.voice, fadeAt), first.voice.baseCutoff,
+        "the cutoff tail returns to base before fade-out");
+      const reused = engine.scheduleJunoArpNote(72, first.reuseAt, interval * gate, false, interval);
+      assert.strictEqual(reused, first.voice, "the fifth note reuses the first pool voice only after its effective release");
+      assert.equal(state.juno.release, requestedRelease, "ARP does not mutate the release state");
+      assert.equal(releaseInput.value, "720", "ARP does not alter the release control value");
+      assert.equal(first.voice.amp.gain.cancelledAt.includes(first.reuseAt), true,
+        "the retrigger cancels only after the prior amplitude tail reached its floor");
+    }
+  }
+});
+
+test("J-4 retains the requested release for slow ARP and manual notes", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+  Object.assign(state.juno, { release: 0.72 });
+  const requestedRelease = state.juno.release;
+  const interval = 60 / 96;
+  const arpVoice = engine.scheduleJunoArpNote(60, 0.1, interval * 0.2, false, interval);
+  assert.equal(arpVoice.effectiveArpRelease, requestedRelease, "slow ARP preserves a release that fits the pool turnaround");
+  assert.equal(arpVoice.arpActiveUntil, arpVoice.releasedAt + requestedRelease);
+  assert.equal(state.juno.release, requestedRelease, "slow ARP leaves release state untouched");
+
+  const manualVoice = engine.startJunoVoice(64, 1);
+  const releaseAt = 1.1;
+  ctx.currentTime = releaseAt;
+  engine.releaseJunoVoice(manualVoice, releaseAt);
+  assert.ok(manualVoice.amp.gain.events.some((event) => event.type === "exponential" && event.time === releaseAt + requestedRelease),
+    "manual notes retain the complete requested release");
+  assert.equal(manualVoice.effectiveArpRelease, undefined, "manual voices do not use the ARP release policy");
+});
+
+test("J-4 non-filter controls preserve active cutoff automation", async () => {
+  const controls = ["pwmAmount", "sub", "resonance", "pulseWidth"].map((name) => {
+    const listeners = new Map();
+    const input = {
+      min: "0", max: "100", value: "0", style: { setProperty() {} },
+      addEventListener(type, listener) { listeners.set(type, listener); },
+    };
+    return {
+      control: { dataset: { junoControl: name }, querySelector(selector) { return selector === "input" ? input : { textContent: "" }; } },
+      input, listeners,
+    };
+  });
+  const { state, engine, ctx, bindJunoControls } = setup({ junoControls: controls.map(({ control }) => control) });
+  await engine.init();
+  Object.assign(state.juno, { attack: 0.2, decay: 0.3, sustain: 0.5 });
+  const voice = engine.startJunoVoice(60, 0.01);
+  ctx.currentTime = 0.12;
+  const before = structuredClone(voice.filterA.frequency.events);
+  bindJunoControls();
+
+  for (const { control, input, listeners } of controls) {
+    input.value = control.dataset.junoControl === "resonance" ? "9" : "70";
+    listeners.get("input")();
+  }
+
+  assert.deepEqual(voice.filterA.frequency.events, before);
+  assert.deepEqual(voice.filterB.frequency.events, before);
+});
+
+test("J-4 rebases live cutoff without a discontinuity during filter decay", async () => {
+  const { state, engine, ctx } = setup();
+  await engine.init();
+  Object.assign(state.juno, { attack: 0.2, decay: 0.3, sustain: 0.5, cutoff: 1000, envAmount: 3000 });
+  const voice = engine.startJunoVoice(60, 0.01);
+  ctx.currentTime = 0.31;
+  const cutoffBefore = engine.junoFilterEnvelopeValueAt(voice, ctx.currentTime);
+  state.juno.cutoff = 1800;
+  engine.updateJunoVoices("cutoff");
+
+  const rebase = voice.filterA.frequency.events.find((event) => event.type === "set" && event.time === ctx.currentTime);
+  assert.ok(Math.abs(rebase.value - cutoffBefore) < 1e-12, "rebasing begins at the current cutoff value");
+  assert.equal(voice.filterA.frequency.events.some((event) => event.type === "target"), false, "filter ADSR never uses setSmooth");
+  assert.equal(voice.filterSustainCutoff, 3300, "the new cutoff retains the same ADSR sustain fraction");
+});
+
 test("J-4 steals the oldest voice with a short fade and keeps four playable voices", async () => {
   const { engine, ctx } = setup();
   await engine.init();
@@ -566,6 +759,7 @@ test("J-4 parameter churn allocates nothing and STOP releases every node and sou
   const baselineSources = ctx.sources.size;
   const voices = [60, 63, 67, 70].map((midi, index) => engine.startJunoVoice(midi, 0.01 + index * 0.01));
   const allocated = ctx.nodes.size;
+  const filterEvents = new Map(voices.map((voice) => [voice, structuredClone(voice.filterA.frequency.events)]));
 
   for (let index = 0; index < 4000; index += 1) {
     ctx.currentTime += 0.003;
@@ -573,13 +767,13 @@ test("J-4 parameter churn allocates nothing and STOP releases every node and sou
     state.juno.pulseWidth = 0.12 + (index % 75) / 100;
     state.juno.pwmAmount = (index % 101) / 100;
     state.juno.lfoRate = 0.08 + (index % 120) / 20;
-    engine.updateJunoVoices();
+    engine.updateJunoVoices("pwmAmount");
     assert.ok(engine.junoUnit.lfo.frequency.events.length <= 2);
     assert.ok(engine.junoUnit.pwmDepth.gain.events.length <= 2);
     voices.forEach((voice) => {
       assert.ok(voice.pulseBias.offset.events.length <= 2);
-      assert.ok(voice.filterA.frequency.events.length <= 2);
-      assert.ok(voice.filterB.frequency.events.length <= 2);
+      assert.deepEqual(voice.filterA.frequency.events, filterEvents.get(voice));
+      assert.deepEqual(voice.filterB.frequency.events, filterEvents.get(voice));
     });
   }
   assert.equal(ctx.nodes.size, allocated, "turning J-4 controls must reuse the live graph");

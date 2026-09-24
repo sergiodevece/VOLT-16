@@ -67,6 +67,7 @@ const BASS_FADE_TIME = 0.008;
 const JUNO_POLYPHONY = 4;
 const JUNO_GAIN_FLOOR = 0.0001;
 const JUNO_FADE_TIME = 0.009;
+const JUNO_ARP_RETRIGGER_MARGIN = 0.006;
 const JUNO_CHORUS_SETTINGS = {
   OFF: { rate: 0.45, depth: 0, wet: 0, dry: 1 },
   I: { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 },
@@ -741,7 +742,7 @@ class AudioEngine {
     this.setSmooth(unit.pwmDepth.gain, settings.pwmDepth, 0.035);
   }
 
-  updateJunoVoices() {
+  updateJunoVoices(controlName = null) {
     if (!this.ctx) return;
     this.updateJunoUnit();
     const synth = state.juno;
@@ -754,11 +755,9 @@ class AudioEngine {
       this.setSmooth(voice.highPass.frequency, clamp(synth.highPass, 20, maxFrequency));
       this.setSmooth(voice.filterA.Q, synth.resonance * 0.72);
       this.setSmooth(voice.filterB.Q, synth.resonance * 0.34);
-      const target = clamp(synth.cutoff + synth.envAmount * synth.sustain, JUNO_FILTER_FLOOR, Math.min(18000, maxFrequency));
-      this.setSmooth(voice.filterA.frequency, target, 0.025);
-      this.setSmooth(voice.filterB.frequency, target, 0.025);
-      voice.baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, Math.min(16000, maxFrequency));
-      voice.peakCutoff = clamp(voice.baseCutoff + synth.envAmount, JUNO_FILTER_FLOOR, Math.min(18000, maxFrequency));
+      if (["cutoff", "envAmount"].includes(controlName) && voice.releasedAt === Infinity) {
+        this.rebaseJunoFilterEnvelope(voice, maxFrequency);
+      }
     });
   }
 
@@ -767,9 +766,120 @@ class AudioEngine {
     if (elapsed < voice.attack) return voice.peak * elapsed / voice.attack;
     if (elapsed < voice.attack + voice.decay) {
       const progress = (elapsed - voice.attack) / voice.decay;
-      return voice.peak + (voice.sustain - voice.peak) * progress;
+      return voice.peak * (voice.sustain / voice.peak) ** progress;
     }
     return voice.sustain;
+  }
+
+  junoFilterEnvelopeValueAt(voice, time) {
+    const envelope = voice.filterEnvelope;
+    if (!envelope) return voice.baseCutoff;
+    let value = envelope.value;
+    for (const segment of envelope.segments) {
+      if (time <= segment.start) return value;
+      if (time < segment.end) {
+        const progress = (time - segment.start) / (segment.end - segment.start);
+        return segment.type === "linear"
+          ? segment.from + (segment.to - segment.from) * progress
+          : segment.from * (segment.to / segment.from) ** progress;
+      }
+      value = segment.to;
+    }
+    return value;
+  }
+
+  scheduleJunoAmpEnvelope(voice, startAt, noteOff = Infinity, release = state.juno.release) {
+    const { attack, decay, peak, sustain } = voice;
+    const finiteNote = Number.isFinite(noteOff);
+    const attackEnd = startAt + attack;
+    const decayEnd = attackEnd + decay;
+    const param = voice.amp.gain;
+    param.cancelScheduledValues(startAt);
+    param.setValueAtTime(0, startAt);
+    if (!finiteNote || noteOff > attackEnd) {
+      param.linearRampToValueAtTime(peak, attackEnd);
+      if (!finiteNote || noteOff > decayEnd) param.exponentialRampToValueAtTime(sustain, decayEnd);
+      else param.exponentialRampToValueAtTime(this.junoEnvelopeLevelAt(voice, noteOff), noteOff);
+    } else {
+      param.linearRampToValueAtTime(this.junoEnvelopeLevelAt(voice, noteOff), noteOff);
+    }
+    if (!finiteNote) return;
+    const releaseLevel = Math.max(JUNO_GAIN_FLOOR, this.junoEnvelopeLevelAt(voice, noteOff));
+    param.setValueAtTime(releaseLevel, noteOff);
+    if (release > 0) param.exponentialRampToValueAtTime(JUNO_GAIN_FLOOR, noteOff + release);
+  }
+
+  scheduleJunoFilterEnvelope(voice, startAt, noteOff = Infinity, release = state.juno.release) {
+    const finiteNote = Number.isFinite(noteOff);
+    const attackEnd = startAt + voice.attack;
+    const decayEnd = attackEnd + voice.decay;
+    const envelope = { value: voice.baseCutoff, segments: [] };
+    let current = voice.baseCutoff;
+    const add = (type, start, end, value) => {
+      if (end <= start) return;
+      envelope.segments.push({ type, start, end, from: current, to: value });
+      current = value;
+    };
+
+    if (!finiteNote || noteOff > attackEnd) {
+      add("linear", startAt, attackEnd, voice.peakCutoff);
+      if (!finiteNote || noteOff > decayEnd) add("exponential", attackEnd, decayEnd, voice.filterSustainCutoff);
+      else {
+        const progress = (noteOff - attackEnd) / voice.decay;
+        add("exponential", attackEnd, noteOff,
+          voice.peakCutoff * (voice.filterSustainCutoff / voice.peakCutoff) ** progress);
+      }
+    } else {
+      const progress = (noteOff - startAt) / voice.attack;
+      add("linear", startAt, noteOff, voice.baseCutoff + (voice.peakCutoff - voice.baseCutoff) * progress);
+    }
+    if (finiteNote && release > 0) add("exponential", noteOff, noteOff + release, voice.baseCutoff);
+
+    [voice.filterA, voice.filterB].forEach((filter) => {
+      filter.frequency.cancelScheduledValues(startAt);
+      filter.frequency.setValueAtTime(voice.baseCutoff, startAt);
+      envelope.segments.forEach((segment) => {
+        if (segment.type === "linear") filter.frequency.linearRampToValueAtTime(segment.to, segment.end);
+        else filter.frequency.exponentialRampToValueAtTime(segment.to, segment.end);
+      });
+    });
+    voice.filterEnvelope = envelope;
+  }
+
+  rebaseJunoFilterEnvelope(voice, maxFrequency) {
+    if (!this.ctx || voice.releasedAt !== Infinity) return;
+    const now = this.ctx.currentTime;
+    const current = this.junoFilterEnvelopeValueAt(voice, now);
+    const synth = state.juno;
+    const baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, Math.min(16000, maxFrequency));
+    const peakCutoff = clamp(baseCutoff + synth.envAmount * voice.filterAccent, JUNO_FILTER_FLOOR, Math.min(18000, maxFrequency));
+    const sustainCutoff = clamp(baseCutoff + (peakCutoff - baseCutoff) * voice.filterSustain, JUNO_FILTER_FLOOR, Math.min(18000, maxFrequency));
+    const attackEnd = voice.startAt + voice.attack;
+    const decayEnd = attackEnd + voice.decay;
+    const envelope = { value: current, segments: [] };
+    let value = current;
+    const add = (type, start, end, target) => {
+      if (end <= start) return;
+      envelope.segments.push({ type, start, end, from: value, to: target });
+      value = target;
+    };
+    if (now < attackEnd) {
+      add("linear", now, attackEnd, peakCutoff);
+      add("exponential", attackEnd, decayEnd, sustainCutoff);
+    } else if (now < decayEnd) {
+      add("exponential", now, decayEnd, sustainCutoff);
+    } else {
+      add("linear", now, now + 0.025, sustainCutoff);
+    }
+    [voice.filterA, voice.filterB].forEach((filter) => {
+      filter.frequency.cancelScheduledValues(now);
+      filter.frequency.setValueAtTime(current, now);
+      envelope.segments.forEach((segment) => {
+        if (segment.type === "linear") filter.frequency.linearRampToValueAtTime(segment.to, segment.end);
+        else filter.frequency.exponentialRampToValueAtTime(segment.to, segment.end);
+      });
+    });
+    Object.assign(voice, { baseCutoff, peakCutoff, filterSustainCutoff: sustainCutoff, filterEnvelope: envelope });
   }
 
   startJunoVoice(midi, time, accent = false, origin = "live", silent = false) {
@@ -843,20 +953,27 @@ class AudioEngine {
     const peak = accent ? 0.78 : 0.62;
     const sustain = Math.max(JUNO_GAIN_FLOOR, peak * synth.sustain);
     const baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, 16000);
-    const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), JUNO_FILTER_FLOOR, 18000);
-    amp.gain.value = 0;
-    amp.gain.setValueAtTime(0, startAt);
-    if (!silent) {
-      amp.gain.linearRampToValueAtTime(peak, startAt + attack);
-      amp.gain.exponentialRampToValueAtTime(sustain, startAt + attack + decay);
+    const filterAccent = accent ? 1.16 : 1;
+    const peakCutoff = clamp(baseCutoff + synth.envAmount * filterAccent, JUNO_FILTER_FLOOR, 18000);
+    const filterSustainCutoff = clamp(baseCutoff + (peakCutoff - baseCutoff) * synth.sustain, JUNO_FILTER_FLOOR, 18000);
+
+    const voice = {
+      midi, origin, startAt, attack, decay, peak, sustain, baseCutoff, peakCutoff, filterSustainCutoff, filterAccent, filterSustain: synth.sustain,
+      releasedAt: silent ? startAt : Infinity, stopAt: Infinity, retiring: false,
+      arpActiveUntil: 0, filterEnvelope: null,
+      saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
+      mix, dcBlocker, highPass, filterA, filterB, amp, fade,
+    };
+    if (silent) {
+      amp.gain.value = 0;
+      amp.gain.setValueAtTime(0, startAt);
+      filterA.frequency.setValueAtTime(baseCutoff, startAt);
+      filterB.frequency.setValueAtTime(baseCutoff, startAt);
+      voice.filterEnvelope = { value: baseCutoff, segments: [] };
+    } else {
+      this.scheduleJunoAmpEnvelope(voice, startAt);
+      this.scheduleJunoFilterEnvelope(voice, startAt);
     }
-    [filterA, filterB].forEach((filter) => {
-      filter.frequency.setValueAtTime(baseCutoff, startAt);
-      if (!silent) {
-        filter.frequency.linearRampToValueAtTime(peakCutoff, startAt + attack);
-        filter.frequency.exponentialRampToValueAtTime(baseCutoff, startAt + attack + decay);
-      }
-    });
 
     saw.connect(sawGain);
     sawGain.connect(mix);
@@ -874,13 +991,6 @@ class AudioEngine {
     amp.connect(fade);
     fade.connect(unit.input);
 
-    const voice = {
-      midi, origin, startAt, attack, decay, peak, sustain, baseCutoff, peakCutoff,
-      releasedAt: silent ? startAt : Infinity, stopAt: Infinity, retiring: false,
-      arpActiveUntil: 0,
-      saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
-      mix, dcBlocker, highPass, filterA, filterB, amp, fade,
-    };
     this.junoVoices.add(voice);
     renderJunoVoiceLeds();
     let ended = 0;
@@ -923,13 +1033,17 @@ class AudioEngine {
     voice.amp.gain.setValueAtTime(level, releaseAt);
     voice.amp.gain.exponentialRampToValueAtTime(JUNO_GAIN_FLOOR, releaseAt + release);
     voice.amp.gain.linearRampToValueAtTime(0, stopAt - 0.006);
-    const normalized = clamp(level / Math.max(JUNO_GAIN_FLOOR, voice.peak), 0, 1);
-    const cutoff = clamp(voice.baseCutoff + (voice.peakCutoff - voice.baseCutoff) * normalized, JUNO_FILTER_FLOOR, 18000);
+    const cutoff = this.junoFilterEnvelopeValueAt(voice, releaseAt);
+    const filterEnvelope = {
+      value: cutoff,
+      segments: [{ type: "exponential", start: releaseAt, end: releaseAt + release, from: cutoff, to: voice.baseCutoff }],
+    };
     [voice.filterA, voice.filterB].forEach((filter) => {
       filter.frequency.cancelScheduledValues(releaseAt);
       filter.frequency.setValueAtTime(cutoff, releaseAt);
-      filter.frequency.exponentialRampToValueAtTime(Math.max(JUNO_FILTER_FLOOR, voice.baseCutoff), releaseAt + release);
+      filter.frequency.exponentialRampToValueAtTime(voice.baseCutoff, releaseAt + release);
     });
+    voice.filterEnvelope = filterEnvelope;
     voice.releasedAt = releaseAt;
     voice.stopAt = stopAt;
     [voice.saw, voice.pulseRamp, voice.pulseBias, voice.sub].forEach((source) => source.stop(stopAt));
@@ -950,8 +1064,8 @@ class AudioEngine {
     renderJunoVoiceLeds();
   }
 
-  scheduleJunoNote(midi, time, duration = 0.5, accent = false, origin = "sequence") {
-    if (origin === "arp") return this.scheduleJunoArpNote(midi, time, duration, accent);
+  scheduleJunoNote(midi, time, duration = 0.5, accent = false, origin = "sequence", arpStepDuration = duration) {
+    if (origin === "arp") return this.scheduleJunoArpNote(midi, time, duration, accent, arpStepDuration);
     const voice = this.startJunoVoice(midi, time, accent, origin);
     if (voice) this.releaseJunoVoice(voice, time + Math.max(0.05, duration));
     return voice;
@@ -969,7 +1083,7 @@ class AudioEngine {
     return voice;
   }
 
-  scheduleJunoArpNote(midi, time, duration, accent = false) {
+  scheduleJunoArpNote(midi, time, duration, accent = false, stepDuration = duration) {
     if (!this.ctx) return null;
     const startAt = Math.max(time, this.ctx.currentTime);
     const voice = this.getJunoArpVoice(startAt);
@@ -983,13 +1097,19 @@ class AudioEngine {
     const sustain = Math.max(JUNO_GAIN_FLOOR, peak * synth.sustain);
     const baseCutoff = clamp(synth.cutoff, JUNO_FILTER_FLOOR, 16000);
     const peakCutoff = clamp(baseCutoff + synth.envAmount * (accent ? 1.16 : 1), JUNO_FILTER_FLOOR, 18000);
-    const noteOff = startAt + Math.max(0.02, duration);
-    const release = Math.max(0.03, synth.release);
-    const elapsed = noteOff - startAt;
-    const releaseLevel = elapsed < attack ? peak * elapsed / attack
-      : elapsed < attack + decay ? peak + (sustain - peak) * ((elapsed - attack) / decay)
-        : sustain;
-    const fadeAt = Math.max(this.ctx.currentTime, startAt - 0.006);
+    const noteDuration = Number.isFinite(duration) ? Math.max(0.02, duration) : 0.02;
+    const noteOff = startAt + noteDuration;
+    const requestedRelease = Number.isFinite(synth.release) ? Math.max(0.03, synth.release) : 0.03;
+    const validStepDuration = Number.isFinite(stepDuration) && stepDuration > 0 ? stepDuration : noteDuration;
+    // A cold pool will be full before this voice comes around again. Once warm,
+    // use its actual size, keeping the calculation tied to the fixed pool.
+    const poolSizeAtReuse = this.junoArpVoicePool.length < JUNO_POLYPHONY
+      ? JUNO_POLYPHONY
+      : this.junoArpVoicePool.length;
+    const arpReuseAt = startAt + validStepDuration * poolSizeAtReuse;
+    const availableRelease = Math.max(0, arpReuseAt - noteOff - JUNO_ARP_RETRIGGER_MARGIN);
+    const effectiveArpRelease = Math.min(requestedRelease, availableRelease);
+    const fadeAt = Math.max(this.ctx.currentTime, startAt - JUNO_ARP_RETRIGGER_MARGIN);
 
     voice.fade.gain.cancelScheduledValues(fadeAt);
     voice.fade.gain.setValueAtTime(1, fadeAt);
@@ -1003,30 +1123,15 @@ class AudioEngine {
     voice.sub.frequency.setValueAtTime(frequency / 2, startAt);
     voice.sub.detune.setValueAtTime(synth.fineTune, startAt);
 
-    voice.amp.gain.cancelScheduledValues(startAt);
-    voice.amp.gain.setValueAtTime(0, startAt);
-    voice.amp.gain.linearRampToValueAtTime(peak, startAt + attack);
-    voice.amp.gain.exponentialRampToValueAtTime(sustain, startAt + attack + decay);
-    voice.amp.gain.cancelScheduledValues(noteOff);
-    voice.amp.gain.setValueAtTime(Math.max(JUNO_GAIN_FLOOR, releaseLevel), noteOff);
-    voice.amp.gain.exponentialRampToValueAtTime(JUNO_GAIN_FLOOR, noteOff + release);
-
-    [voice.filterA, voice.filterB].forEach((filter) => {
-      filter.frequency.cancelScheduledValues(startAt);
-      filter.frequency.setValueAtTime(baseCutoff, startAt);
-      filter.frequency.linearRampToValueAtTime(peakCutoff, startAt + attack);
-      filter.frequency.exponentialRampToValueAtTime(baseCutoff, startAt + attack + decay);
-      filter.frequency.cancelScheduledValues(noteOff);
-      const normalized = clamp(releaseLevel / Math.max(JUNO_GAIN_FLOOR, peak), 0, 1);
-      const releaseCutoff = clamp(baseCutoff + (peakCutoff - baseCutoff) * normalized, JUNO_FILTER_FLOOR, 18000);
-      filter.frequency.setValueAtTime(releaseCutoff, noteOff);
-      filter.frequency.exponentialRampToValueAtTime(Math.max(JUNO_FILTER_FLOOR, baseCutoff), noteOff + release);
-    });
-
     Object.assign(voice, {
       midi, startAt, attack, decay, peak, sustain, baseCutoff, peakCutoff,
-      releasedAt: noteOff, arpActiveUntil: noteOff + release,
+      filterSustainCutoff: clamp(baseCutoff + (peakCutoff - baseCutoff) * synth.sustain, JUNO_FILTER_FLOOR, 18000),
+      filterAccent: accent ? 1.16 : 1, filterSustain: synth.sustain,
+      releasedAt: noteOff, arpActiveUntil: noteOff + effectiveArpRelease,
+      effectiveArpRelease, arpAvailableRelease: availableRelease, arpReuseAt,
     });
+    this.scheduleJunoAmpEnvelope(voice, startAt, noteOff, effectiveArpRelease);
+    this.scheduleJunoFilterEnvelope(voice, startAt, noteOff, effectiveArpRelease);
     renderJunoVoiceLeds();
     return voice;
   }
@@ -2565,7 +2670,7 @@ function bindJunoControls() {
       state.juno[name] = junoStateValue(name, raw);
       control.querySelector("output").textContent = formatJunoOutput(name, raw);
       rangeFill(input);
-      if (name !== "attack") engine.updateJunoVoices();
+      if (name !== "attack") engine.updateJunoVoices(name);
     });
   });
   if (dom.junoKeyboard) {
@@ -2738,7 +2843,7 @@ function scheduleArpeggiator(now, horizon) {
   while (nextArpTime < horizon) {
     const notes = getJunoArpNotes();
     const midi = chooseArpNote(notes);
-    if (midi !== null) engine.scheduleJunoNote(midi, nextArpTime, interval * state.juno.arp.gate, false, "arp");
+    if (midi !== null) engine.scheduleJunoNote(midi, nextArpTime, interval * state.juno.arp.gate, false, "arp", interval);
     nextArpTime += interval;
   }
 }
