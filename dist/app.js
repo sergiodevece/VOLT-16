@@ -68,6 +68,16 @@ const JUNO_POLYPHONY = 4;
 const JUNO_GAIN_FLOOR = 0.0001;
 const JUNO_FADE_TIME = 0.009;
 const JUNO_ARP_RETRIGGER_MARGIN = 0.006;
+const DIAGNOSTIC_BUFFER_SIZE = 256;
+const DIAGNOSTIC_METRICS = {
+  schedulerInterval: 0, schedulerLateness: 1, schedulerSkippedThisTick: 2, schedulerHorizon: 3,
+  schedulerEvents: 4, input: 5, directRender: 6, playheadRender: 7,
+  scopeRender: 8, meterRender: 9, longTask: 10, audioClockDelta: 11,
+  animationFrameGap: 12, tabSwitch: 13, controlFlush: 14,
+  scheduledStartDelta: 15, scheduledStopDelta: 16, audioProgress: 17, outputTimestampSkew: 18,
+};
+const DIAGNOSTIC_METRIC_COUNT = 19;
+const DIAGNOSTIC_VOICE_INDEX = Object.fromEntries(CHANNELS.map(({ id }, index) => [id, index]));
 const JUNO_CHORUS_SETTINGS = {
   OFF: { rate: 0.45, depth: 0, wet: 0, dry: 1 },
   I: { rate: 0.52, depth: 0.0019, wet: 0.52, dry: 0.86 },
@@ -371,6 +381,329 @@ function panLabel(value) {
   return `${amount}${value < 0 ? "L" : "R"}`;
 }
 
+class PerformanceDiagnostics {
+  constructor() {
+    this.enabled = false;
+    this.buffers = null;
+    this.writeIndexes = null;
+    this.sampleCounts = null;
+    this.voiceCreated = null;
+    this.voiceActive = null;
+    this.voiceCleaned = null;
+    this.totals = null;
+    this.lastSchedulerTick = NaN;
+    this.lastAnimationFrame = NaN;
+    this.audioClockReferencePerformance = NaN;
+    this.audioClockReferenceAudio = NaN;
+    this.lastAudioClockPerformance = NaN;
+    this.lastAudioClockTime = NaN;
+    this.lastClockJumpMs = 0;
+    this.lastClockJumpPerformance = NaN;
+    this.lastLongTaskDuration = 0;
+    this.lastLongTaskPerformance = NaN;
+    this.lastControl = "—";
+    this.lastAudioState = "uninitialized";
+    this.lastAudioStateReason = "initial";
+    this.lastAudioStatePerformance = NaN;
+    this.outputTimestampCurrentTime = NaN;
+    this.outputTimestampContextTime = NaN;
+    this.outputTimestampPerformanceTime = NaN;
+    this.outputTimestampNow = NaN;
+    this.outputTimestampBaseLatency = 0;
+    this.outputTimestampOutputLatency = 0;
+    this.observer = null;
+  }
+
+  enable(audioEngine) {
+    if (this.enabled) return;
+    this.buffers = Array.from({ length: DIAGNOSTIC_METRIC_COUNT }, () => new Float64Array(DIAGNOSTIC_BUFFER_SIZE));
+    this.writeIndexes = new Uint16Array(DIAGNOSTIC_METRIC_COUNT);
+    this.sampleCounts = new Uint16Array(DIAGNOSTIC_METRIC_COUNT);
+    this.voiceCreated = new Uint32Array(CHANNELS.length);
+    this.voiceActive = new Uint32Array(CHANNELS.length);
+    this.voiceCleaned = new Uint32Array(CHANNELS.length);
+    this.totals = {
+      schedulerTicks: 0, skippedSteps: 0, scheduledEvents: 0, inputEvents: 0, longTasks: 0, visibilityChanges: 0,
+      scopeFrames: 0, meterFrames: 0, scopeSkippedVisibility: 0, meterSkippedVisibility: 0, meterSkippedRate: 0,
+      scheduledPast: 0, scheduledInHorizon: 0, scheduledTooFar: 0, audioStateChanges: 0,
+    };
+    this.lastSchedulerTick = NaN;
+    this.lastAnimationFrame = NaN;
+    this.lastAudioClockPerformance = NaN;
+    this.lastAudioClockTime = NaN;
+    this.lastClockJumpMs = 0;
+    this.lastClockJumpPerformance = NaN;
+    this.lastLongTaskDuration = 0;
+    this.lastLongTaskPerformance = NaN;
+    this.lastControl = "—";
+    this.lastAudioState = audioEngine?.ctx?.state || "uninitialized";
+    this.lastAudioStateReason = "initial";
+    this.lastAudioStatePerformance = performance.now();
+    this.outputTimestampCurrentTime = NaN;
+    this.outputTimestampContextTime = NaN;
+    this.outputTimestampPerformanceTime = NaN;
+    this.outputTimestampNow = NaN;
+    this.outputTimestampBaseLatency = 0;
+    this.outputTimestampOutputLatency = 0;
+    this.enabled = true;
+    this.syncActiveVoices(audioEngine);
+    this.resetAudioClockReference(audioEngine);
+    this.startLongTaskObserver();
+  }
+
+  disable() {
+    if (!this.enabled) return;
+    this.enabled = false;
+    this.observer?.disconnect();
+    this.observer = null;
+  }
+
+  record(metric, value) {
+    if (!this.enabled || !Number.isFinite(value)) return;
+    const index = DIAGNOSTIC_METRICS[metric];
+    const buffer = this.buffers[index];
+    const writeIndex = this.writeIndexes[index];
+    buffer[writeIndex] = value;
+    this.writeIndexes[index] = (writeIndex + 1) % DIAGNOSTIC_BUFFER_SIZE;
+    if (this.sampleCounts[index] < DIAGNOSTIC_BUFFER_SIZE) this.sampleCounts[index] += 1;
+  }
+
+  begin() {
+    return this.enabled ? performance.now() : 0;
+  }
+
+  end(metric, startedAt) {
+    if (this.enabled) this.record(metric, performance.now() - startedAt);
+  }
+
+  recordScheduler(audioNow, latenessMs, skippedSteps, horizonMs, scheduledEvents) {
+    if (!this.enabled) return;
+    const now = performance.now();
+    if (Number.isFinite(this.lastSchedulerTick)) this.record("schedulerInterval", now - this.lastSchedulerTick);
+    this.lastSchedulerTick = now;
+    this.record("schedulerLateness", latenessMs);
+    this.record("schedulerSkippedThisTick", skippedSteps);
+    this.record("schedulerHorizon", horizonMs);
+    this.record("schedulerEvents", scheduledEvents);
+    if (Number.isFinite(this.audioClockReferencePerformance) && Number.isFinite(this.audioClockReferenceAudio)) {
+      this.record("audioClockDelta", (now - this.audioClockReferencePerformance) - (audioNow - this.audioClockReferenceAudio) * 1000);
+    }
+    this.totals.schedulerTicks += 1;
+    this.totals.skippedSteps += skippedSteps;
+    this.totals.scheduledEvents += scheduledEvents;
+  }
+
+  recordInput(startedAt) {
+    if (!this.enabled) return;
+    this.record("input", performance.now() - startedAt);
+    this.totals.inputEvents += 1;
+  }
+
+  recordControl(name) {
+    if (this.enabled && name) this.lastControl = String(name);
+  }
+
+  recordAudioState(audioEngine, reason = "statechange") {
+    if (!this.enabled) return;
+    this.lastAudioState = audioEngine?.ctx?.state || "uninitialized";
+    this.lastAudioStatePerformance = performance.now();
+    this.totals.audioStateChanges += 1;
+    this.lastAudioStateReason = reason;
+  }
+
+  captureAudioClock(audioEngine) {
+    if (!this.enabled || !audioEngine?.ctx) return;
+    const context = audioEngine.ctx;
+    const now = performance.now();
+    const currentTime = context.currentTime;
+    if (Number.isFinite(this.lastAudioClockPerformance) && Number.isFinite(this.lastAudioClockTime)) {
+      const wallElapsed = now - this.lastAudioClockPerformance;
+      const audioElapsed = (currentTime - this.lastAudioClockTime) * 1000;
+      const jump = wallElapsed - audioElapsed;
+      this.record("audioProgress", audioElapsed);
+      if (Math.abs(jump) >= 50) {
+        this.lastClockJumpMs = jump;
+        this.lastClockJumpPerformance = now;
+      }
+    }
+    this.lastAudioClockPerformance = now;
+    this.lastAudioClockTime = currentTime;
+    if (typeof context.getOutputTimestamp !== "function") return;
+    try {
+      const timestamp = context.getOutputTimestamp();
+      if (!timestamp || !Number.isFinite(timestamp.contextTime) || !Number.isFinite(timestamp.performanceTime)) return;
+      this.outputTimestampCurrentTime = currentTime;
+      this.outputTimestampContextTime = timestamp.contextTime;
+      this.outputTimestampPerformanceTime = timestamp.performanceTime;
+      this.outputTimestampNow = now;
+      this.outputTimestampBaseLatency = Number(context.baseLatency) || 0;
+      this.outputTimestampOutputLatency = Number(context.outputLatency) || 0;
+      this.record("outputTimestampSkew", timestamp.performanceTime - now);
+    } catch {
+      // Optional on Safari and some Android implementations.
+    }
+  }
+
+  recordScheduledEvent(startAt, stopAt, audioEngine, horizon = 0.11) {
+    if (!this.enabled || !audioEngine?.ctx) return;
+    const now = audioEngine.ctx.currentTime;
+    const startDelta = startAt - now;
+    const stopDelta = stopAt - now;
+    if (Number.isFinite(startDelta)) {
+      this.record("scheduledStartDelta", startDelta * 1000);
+      if (startDelta < 0) this.totals.scheduledPast += 1;
+      else if (startDelta <= horizon) this.totals.scheduledInHorizon += 1;
+      else this.totals.scheduledTooFar += 1;
+    }
+    if (Number.isFinite(stopDelta)) this.record("scheduledStopDelta", stopDelta * 1000);
+  }
+
+  voiceCreatedFor(track) {
+    if (!this.enabled) return;
+    const index = DIAGNOSTIC_VOICE_INDEX[track];
+    if (index === undefined) return;
+    this.voiceCreated[index] += 1;
+    this.voiceActive[index] += 1;
+  }
+
+  voiceCleanedFor(track) {
+    if (!this.enabled) return;
+    const index = DIAGNOSTIC_VOICE_INDEX[track];
+    if (index === undefined) return;
+    this.voiceCleaned[index] += 1;
+    if (this.voiceActive[index] > 0) this.voiceActive[index] -= 1;
+  }
+
+  syncActiveVoices(audioEngine) {
+    if (!this.enabled || !audioEngine) return;
+    this.voiceActive.fill(0);
+    audioEngine.drumVoices.forEach((voice) => {
+      const index = DIAGNOSTIC_VOICE_INDEX[voice.track];
+      if (index !== undefined) this.voiceActive[index] += 1;
+    });
+    this.voiceActive[DIAGNOSTIC_VOICE_INDEX.bass] = audioEngine.bassVoices.size;
+    this.voiceActive[DIAGNOSTIC_VOICE_INDEX.juno] = audioEngine.junoVoices.size;
+  }
+
+  recordVisibility(audioEngine) {
+    if (!this.enabled) return;
+    this.totals.visibilityChanges += 1;
+    this.syncActiveVoices(audioEngine);
+  }
+
+  resetAudioClockReference(audioEngine) {
+    if (!this.enabled || !audioEngine?.ctx) return;
+    this.audioClockReferencePerformance = performance.now();
+    this.audioClockReferenceAudio = audioEngine.ctx.currentTime;
+  }
+
+  recordAnimationFrame(timestamp) {
+    if (!this.enabled) return;
+    if (Number.isFinite(this.lastAnimationFrame)) this.record("animationFrameGap", timestamp - this.lastAnimationFrame);
+    this.lastAnimationFrame = timestamp;
+  }
+
+  recordVisualFrame(kind) {
+    if (!this.enabled) return;
+    if (kind === "scope") this.totals.scopeFrames += 1;
+    else this.totals.meterFrames += 1;
+  }
+
+  recordVisualSkip(kind, reason) {
+    if (!this.enabled) return;
+    if (reason === "visibility") {
+      if (kind === "scope") this.totals.scopeSkippedVisibility += 1;
+      else this.totals.meterSkippedVisibility += 1;
+    } else if (kind === "meter") this.totals.meterSkippedRate += 1;
+  }
+
+  startLongTaskObserver() {
+    const Observer = window.PerformanceObserver || globalThis.PerformanceObserver;
+    if (!Observer) return;
+    try {
+      this.observer = new Observer((entries) => {
+        if (!this.enabled) return;
+        entries.getEntries().forEach((entry) => {
+          if (entry.duration > 50) {
+            this.record("longTask", entry.duration);
+            this.totals.longTasks += 1;
+            this.lastLongTaskDuration = entry.duration;
+            this.lastLongTaskPerformance = Number.isFinite(entry.startTime) ? entry.startTime + entry.duration : performance.now();
+          }
+        });
+      });
+      this.observer.observe({ type: "longtask", buffered: true });
+    } catch {
+      this.observer?.disconnect();
+      this.observer = null;
+    }
+  }
+
+  metricSummary(metric) {
+    if (!this.enabled) return { count: 0, min: 0, max: 0, p50: 0, p95: 0 };
+    const index = DIAGNOSTIC_METRICS[metric];
+    const count = this.sampleCounts[index];
+    if (!count) return { count: 0, min: 0, max: 0, p50: 0, p95: 0 };
+    const values = new Float64Array(count);
+    const start = count === DIAGNOSTIC_BUFFER_SIZE ? this.writeIndexes[index] : 0;
+    for (let offset = 0; offset < count; offset += 1) values[offset] = this.buffers[index][(start + offset) % DIAGNOSTIC_BUFFER_SIZE];
+    values.sort();
+    return {
+      count,
+      min: values[0],
+      max: values[count - 1],
+      p50: values[Math.floor((count - 1) * 0.5)],
+      p95: values[Math.floor((count - 1) * 0.95)],
+    };
+  }
+
+  snapshot(audioEngine) {
+    this.syncActiveVoices(audioEngine);
+    const voices = {};
+    CHANNELS.forEach(({ id }, index) => {
+      voices[id] = { created: this.voiceCreated?.[index] || 0, active: this.voiceActive?.[index] || 0, cleaned: this.voiceCleaned?.[index] || 0 };
+    });
+    return {
+      enabled: this.enabled,
+      bufferSize: DIAGNOSTIC_BUFFER_SIZE,
+      scheduler: ["schedulerInterval", "schedulerLateness", "schedulerSkippedThisTick", "schedulerHorizon", "schedulerEvents"].map((metric) => [metric, this.metricSummary(metric)]),
+      ui: ["input", "directRender", "playheadRender", "scopeRender", "meterRender", "longTask", "animationFrameGap", "tabSwitch", "controlFlush"].map((metric) => [metric, this.metricSummary(metric)]),
+      audioClock: this.metricSummary("audioClockDelta"),
+      timing: ["scheduledStartDelta", "scheduledStopDelta", "audioProgress", "outputTimestampSkew"].map((metric) => [metric, this.metricSummary(metric)]),
+      totals: this.totals ? { ...this.totals } : null,
+      voices,
+      fxActive: audioEngine ? audioEngine.channelDelays.size + audioEngine.channelChoruses.size + audioEngine.channelPhasers.size + audioEngine.channelFlangers.size + audioEngine.channelReverbs.size : 0,
+      audioContextState: audioEngine?.ctx?.state || "uninitialized",
+      visibilityState: document.visibilityState,
+      visualMode: getVisualMode(),
+      visuals: getVisualDiagnostics(),
+      clock: {
+        lastJumpMs: this.lastClockJumpMs,
+        lastJumpPerformance: this.lastClockJumpPerformance,
+        lastLongTaskDuration: this.lastLongTaskDuration,
+        lastLongTaskPerformance: this.lastLongTaskPerformance,
+        outputTimestamp: {
+          currentTime: this.outputTimestampCurrentTime,
+          contextTime: this.outputTimestampContextTime,
+          performanceTime: this.outputTimestampPerformanceTime,
+          now: this.outputTimestampNow,
+          baseLatency: this.outputTimestampBaseLatency,
+          outputLatency: this.outputTimestampOutputLatency,
+        },
+      },
+      scheduling: this.totals ? {
+        past: this.totals.scheduledPast,
+        inHorizon: this.totals.scheduledInHorizon,
+        tooFar: this.totals.scheduledTooFar,
+      } : null,
+      lastControl: this.lastControl,
+      lastAudioState: { state: this.lastAudioState, reason: this.lastAudioStateReason || "initial", at: this.lastAudioStatePerformance },
+    };
+  }
+}
+
+const diagnostics = new PerformanceDiagnostics();
+
 class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -396,6 +729,7 @@ class AudioEngine {
     this.channelReverbs = new Map();
     this.driveCache = new Map();
     this.smoothParams = new WeakMap();
+    this.diagnosticTaps = null;
     this.bassVoices = new Set();
     this.junoVoices = new Set();
     this.junoUnit = null;
@@ -416,7 +750,14 @@ class AudioEngine {
 
   async init() {
     if (this.ctx) {
-      if (this.ctx.state === "suspended") await this.ctx.resume();
+      if (this.ctx.state === "suspended") {
+        try {
+          await resumeAudioContext(this, "resume");
+        } catch (error) {
+          diagnostics.recordAudioState(this, "resume-rejected");
+          throw error;
+        }
+      }
       return;
     }
 
@@ -428,6 +769,7 @@ class AudioEngine {
     } catch {
       this.ctx = new Context();
     }
+    if (diagnosticsPanelRequested()) installDiagnosticContextListeners(this);
     this.masterInput = this.ctx.createGain();
     this.masterLimiter = this.ctx.createDynamicsCompressor();
     this.masterLimiterDry = this.ctx.createGain();
@@ -555,7 +897,76 @@ class AudioEngine {
     this.updateMasterProcessor();
     this.updateAllEffectSends();
 
-    if (this.ctx.state === "suspended") await this.ctx.resume();
+    if (this.ctx.state === "suspended") await resumeAudioContext(this, "init-resume");
+  }
+
+  createDiagnosticTaps() {
+    if (!diagnostics.enabled || !this.ctx || this.diagnosticTaps) return this.diagnosticTaps;
+    const createTap = (source) => {
+      const analyser = this.ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0;
+      source.connect(analyser);
+      return { source, analyser, byteData: new Uint8Array(analyser.fftSize), floatData: null };
+    };
+    this.diagnosticTaps = {
+      drums: ["kick", "snare", "clap", "closedHat", "openHat"].map((id) => createTap(this.channels[id].input)),
+      bass: createTap(this.channels.bass.input),
+      juno: createTap(this.channels.juno.input),
+      masterPre: createTap(this.masterInput),
+      masterOut: { analyser: this.analyser, byteData: new Uint8Array(this.analyser.fftSize), floatData: null },
+    };
+    return this.diagnosticTaps;
+  }
+
+  captureDiagnosticSignal() {
+    const taps = this.createDiagnosticTaps();
+    if (!taps) return null;
+    const sample = (tap) => {
+      const analyser = tap.analyser;
+      const size = analyser.fftSize;
+      let sum = 0; let peak = 0; let finite = true;
+      if (typeof analyser.getFloatTimeDomainData === "function") {
+        if (!(tap.floatData instanceof Float32Array) || tap.floatData.length !== size) tap.floatData = new Float32Array(size);
+        analyser.getFloatTimeDomainData(tap.floatData);
+        for (let index = 0; index < size; index += 1) {
+          const value = tap.floatData[index];
+          if (!Number.isFinite(value)) finite = false;
+          const magnitude = Math.abs(value);
+          sum += value * value;
+          if (magnitude > peak) peak = magnitude;
+        }
+      } else {
+        if (!(tap.byteData instanceof Uint8Array) || tap.byteData.length !== size) tap.byteData = new Uint8Array(size);
+        analyser.getByteTimeDomainData(tap.byteData);
+        for (let index = 0; index < size; index += 1) {
+          const value = (tap.byteData[index] - 128) / 128;
+          const magnitude = Math.abs(value);
+          sum += value * value;
+          if (magnitude > peak) peak = magnitude;
+        }
+      }
+      return { rms: Math.sqrt(sum / size), peak, finite };
+    };
+    const combine = (signals) => ({
+      rms: Math.sqrt(signals.reduce((sum, signal) => sum + signal.rms ** 2, 0)),
+      peak: signals.reduce((peak, signal) => Math.max(peak, signal.peak), 0),
+      finite: signals.every((signal) => signal.finite),
+    });
+    return {
+      drums: combine(taps.drums.map(sample)), bass: sample(taps.bass), juno: sample(taps.juno),
+      masterPre: sample(taps.masterPre), masterOut: sample(taps.masterOut),
+    };
+  }
+
+  disposeDiagnosticTaps() {
+    if (!this.diagnosticTaps) return;
+    const taps = [...this.diagnosticTaps.drums, this.diagnosticTaps.bass, this.diagnosticTaps.juno, this.diagnosticTaps.masterPre];
+    taps.forEach((tap) => {
+      try { tap.source.disconnect(tap.analyser); } catch { /* already detached */ }
+      tap.analyser.disconnect();
+    });
+    this.diagnosticTaps = null;
   }
 
   autoCutoffFrequency() {
@@ -1025,6 +1436,7 @@ class AudioEngine {
     fade.connect(unit.input);
 
     this.junoVoices.add(voice);
+    diagnostics.voiceCreatedFor("juno");
     renderJunoVoiceLeds();
     let ended = 0;
     const cleanup = () => {
@@ -1040,6 +1452,7 @@ class AudioEngine {
       [saw, pulseRamp, pulseBias, sub, sawGain, pulseShaper, pulseGain, subGain,
         mix, dcBlocker, highPass, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
       this.junoVoices.delete(voice);
+      diagnostics.voiceCleanedFor("juno");
       this.junoArpVoicePool = this.junoArpVoicePool.filter((pooled) => pooled !== voice);
       this.junoArpPoolIndex %= Math.max(1, this.junoArpVoicePool.length);
       this.junoHeldVoices.forEach((held, key) => { if (held === voice) this.junoHeldVoices.delete(key); });
@@ -1100,7 +1513,10 @@ class AudioEngine {
   scheduleJunoNote(midi, time, duration = 0.5, accent = false, origin = "sequence", arpStepDuration = duration) {
     if (origin === "arp") return this.scheduleJunoArpNote(midi, time, duration, accent, arpStepDuration);
     const voice = this.startJunoVoice(midi, time, accent, origin);
-    if (voice) this.releaseJunoVoice(voice, time + Math.max(0.05, duration));
+    if (voice) {
+      this.releaseJunoVoice(voice, time + Math.max(0.05, duration));
+      if (diagnostics.enabled) diagnostics.recordScheduledEvent(time, voice.stopAt, this);
+    }
     return voice;
   }
 
@@ -1165,6 +1581,7 @@ class AudioEngine {
     });
     this.scheduleJunoAmpEnvelope(voice, startAt, noteOff, effectiveArpRelease);
     this.scheduleJunoFilterEnvelope(voice, startAt, noteOff, effectiveArpRelease);
+    if (diagnostics.enabled) diagnostics.recordScheduledEvent(startAt, noteOff + effectiveArpRelease + 0.018, this);
     renderJunoVoiceLeds();
     return voice;
   }
@@ -1223,6 +1640,8 @@ class AudioEngine {
     this.junoPreviewRequests.set(key, request);
     await this.init();
     if (this.junoPreviewRequests.get(key) !== request) return;
+    refreshVisualVisibility();
+    updateMeterAnimation();
     const note = { midi, order: this.junoInputOrder += 1 };
     this.junoInputNotes.set(key, note);
     FX_NAMES.forEach((effect) => this.updateEffectSend("juno", effect));
@@ -1971,6 +2390,7 @@ class AudioEngine {
   trackDrumVoice(track, sources, nodes, fade, stopAt) {
     const voice = { track, sources, fade, stopAt, fadeAt: Infinity };
     this.drumVoices.add(voice);
+    diagnostics.voiceCreatedFor(track);
     let remaining = sources.length;
     sources.forEach((source) => {
       source.onended = () => {
@@ -1979,6 +2399,7 @@ class AudioEngine {
         if (remaining !== 0) return;
         nodes.forEach((node) => node.disconnect());
         this.drumVoices.delete(voice);
+        diagnostics.voiceCleanedFor(track);
       };
     });
     return voice;
@@ -2160,11 +2581,14 @@ class AudioEngine {
   scheduleDrum(track, time, level, velocityOverride = null) {
     if (!this.ctx || level === 0 || isChannelMuted(track)) return;
     const velocity = Number.isFinite(velocityOverride) ? clamp(velocityOverride, 0, 1) : level === 2 ? 1 : 0.72;
-    if (track === "kick") return this.scheduleKick(time, velocity);
-    if (track === "snare") return this.scheduleSnare(time, velocity);
-    if (track === "clap") return this.scheduleClap(time, velocity);
-    if (track === "closedHat") return this.scheduleHat(time, velocity, false);
-    if (track === "openHat") return this.scheduleHat(time, velocity, true);
+    let voice;
+    if (track === "kick") voice = this.scheduleKick(time, velocity);
+    else if (track === "snare") voice = this.scheduleSnare(time, velocity);
+    else if (track === "clap") voice = this.scheduleClap(time, velocity);
+    else if (track === "closedHat") voice = this.scheduleHat(time, velocity, false);
+    else if (track === "openHat") voice = this.scheduleHat(time, velocity, true);
+    if (voice && diagnostics.enabled) diagnostics.recordScheduledEvent(time, voice.stopAt, this);
+    return voice;
   }
 
   scheduleBass(step, time, duration, previousMidi = null) {
@@ -2259,6 +2683,8 @@ class AudioEngine {
     this.fadeBassVoices(time);
     const voice = { osc, sub, amp, fade, filters: [filterA, filterB], stopAt, fadeAt: Infinity };
     this.bassVoices.add(voice);
+    if (diagnostics.enabled) diagnostics.recordScheduledEvent(time, stopAt, this);
+    diagnostics.voiceCreatedFor("bass");
     let endedSources = 0;
     const cleanup = () => {
       endedSources += 1;
@@ -2267,6 +2693,7 @@ class AudioEngine {
       this.detachAutoCutoff(voice.filters);
       [osc, sub, oscGain, subGain, drive, filterA, filterB, amp, fade].forEach((node) => node.disconnect());
       this.bassVoices.delete(voice);
+      diagnostics.voiceCleanedFor("bass");
     };
     osc.onended = cleanup;
     sub.onended = cleanup;
@@ -2304,6 +2731,8 @@ class AudioEngine {
     this.drumPreviewRequests[track] = request;
     await this.init();
     if (this.drumPreviewRequests[track] !== request || state.playing || state.starting) return;
+    refreshVisualVisibility();
+    updateMeterAnimation();
     this.updateEffectSend(track, "delay");
     this.updateEffectSend(track, "chorus");
     this.updateEffectSend(track, "phaser");
@@ -2321,6 +2750,8 @@ class AudioEngine {
     const previewStep = { ...step, active: true };
     await this.init();
     if (request !== this.bassPreviewRequest || state.playing || state.starting) return;
+    refreshVisualVisibility();
+    updateMeterAnimation();
     this.updateEffectSend("bass", "delay");
     this.updateEffectSend("bass", "chorus");
     this.updateEffectSend("bass", "phaser");
@@ -2341,17 +2772,116 @@ let arpStepIndex = 0;
 let lastRandomArpMidi = null;
 let previousBassMidi = null;
 let previousStepHadBass = false;
-const playheadTimers = new Set();
+const PLAYHEAD_QUEUE_SIZE = 16;
+const pendingPlayheadSteps = new Int8Array(PLAYHEAD_QUEUE_SIZE);
+const pendingPlayheadTimes = new Float64Array(PLAYHEAD_QUEUE_SIZE);
+let pendingPlayheadRead = 0;
+let pendingPlayheadWrite = 0;
+let pendingPlayheadCount = 0;
+let playheadAnimationFrame = null;
+let renderedPlayheadStep = -1;
+const playheadElements = {
+  position: [],
+  drums: Object.fromEntries(TRACKS.map(({ id }) => [id, []])),
+  bass: [],
+};
+const pendingControlUpdates = new Set();
+const coalescedRangeBindings = new WeakMap();
+let controlAnimationFrame = null;
 let activeTab = "drums";
 const computerJunoHeld = new Map();
 let meterAnimationFrame = null;
 let lastMeterFrame = -Infinity;
 let scopeData = null;
 let masterMeterData = null;
+let visualVisibility = { scope: false, meter: false };
 let masterClipHoldUntil = 0;
 let wakeLock = null;
 let toastTimer = null;
 let tapTimes = [];
+let diagnosticInputStartedAt = 0;
+let diagnosticsInputListenersInstalled = false;
+let diagnosticsContextWithListeners = null;
+
+function flushCoalescedControls(timestamp) {
+  controlAnimationFrame = null;
+  const diagnosticStartedAt = diagnostics.begin();
+  pendingControlUpdates.forEach((pending) => {
+    pending.queued = false;
+    if (pending.value !== pending.lastApplied) {
+      pending.apply(pending.value);
+      pending.lastApplied = pending.value;
+    }
+  });
+  pendingControlUpdates.clear();
+  diagnostics.end("controlFlush", diagnosticStartedAt);
+}
+
+function queueCoalescedControl(pending, value) {
+  pending.value = value;
+  if (value === pending.lastApplied) {
+    if (pending.queued) {
+      pendingControlUpdates.delete(pending);
+      pending.queued = false;
+      if (pendingControlUpdates.size === 0 && controlAnimationFrame !== null) {
+        window.cancelAnimationFrame(controlAnimationFrame);
+        controlAnimationFrame = null;
+      }
+    }
+    return;
+  }
+  if (!pending.queued) {
+    pending.queued = true;
+    pendingControlUpdates.add(pending);
+  }
+  if (controlAnimationFrame === null) controlAnimationFrame = window.requestAnimationFrame(flushCoalescedControls);
+}
+
+function flushCoalescedControl(pending) {
+  if (!pending.queued) return;
+  pendingControlUpdates.delete(pending);
+  pending.queued = false;
+  if (pending.value !== pending.lastApplied) {
+    pending.apply(pending.value);
+    pending.lastApplied = pending.value;
+  }
+  if (pendingControlUpdates.size === 0 && controlAnimationFrame !== null) {
+    window.cancelAnimationFrame(controlAnimationFrame);
+    controlAnimationFrame = null;
+  }
+}
+
+function syncCoalescedRange(input, value = input?.value) {
+  const pending = input ? coalescedRangeBindings.get(input) : null;
+  if (!pending) return String(value);
+  // A user gesture already queued for this range wins over a simultaneous
+  // visual rehydration. Apply it first, then make that effective value the
+  // synchronized baseline instead of silently discarding the gesture.
+  const hadPendingGesture = pending.queued;
+  if (hadPendingGesture) flushCoalescedControl(pending);
+  const synchronizedValue = hadPendingGesture ? pending.lastApplied : String(value);
+  if (hadPendingGesture) input.value = synchronizedValue;
+  pending.value = synchronizedValue;
+  pending.lastApplied = synchronizedValue;
+  return synchronizedValue;
+}
+
+function bindCoalescedRange(input, apply, renderValue = null) {
+  const pending = { value: input.value, lastApplied: input.value, apply, queued: false };
+  coalescedRangeBindings.set(input, pending);
+  const enqueue = () => {
+    const value = input.value;
+    if (renderValue) renderValue(value);
+    queueCoalescedControl(pending, value);
+  };
+  const flush = () => {
+    if (input.value !== pending.value || input.value !== pending.lastApplied) enqueue();
+    flushCoalescedControl(pending);
+  };
+  input.addEventListener("input", enqueue);
+  ["change", "pointerup", "pointercancel", "blur"].forEach((eventName) => input.addEventListener(eventName, flush));
+  return pending;
+}
 
 const dom = {
   play: document.getElementById("playButton"),
@@ -2395,16 +2925,19 @@ const dom = {
 
 function renderPositionLeds() {
   dom.positionLeds.replaceChildren();
+  playheadElements.position.length = 0;
   for (let index = 0; index < 16; index += 1) {
     const led = document.createElement("span");
     led.className = `position-led${index % 4 === 0 ? " is-beat" : ""}`;
     led.dataset.step = String(index);
     dom.positionLeds.append(led);
+    playheadElements.position[index] = led;
   }
 }
 
 function renderDrumSequencer() {
   dom.drumSequencer.replaceChildren();
+  TRACKS.forEach(({ id }) => { playheadElements.drums[id].length = 0; });
   const corner = document.createElement("div");
   corner.className = "step-number";
   corner.textContent = "VOICE";
@@ -2449,6 +2982,7 @@ function renderDrumSequencer() {
       button.setAttribute("aria-label", `${track.label}, paso ${step + 1}: ${levelName}`);
       button.setAttribute("aria-pressed", String(level > 0));
       dom.drumSequencer.append(button);
+      playheadElements.drums[track.id][step] = button;
     });
   });
 }
@@ -2501,6 +3035,7 @@ function renderNoteKeyboard() {
 
 function renderBassSequencer() {
   dom.bassSequencer.replaceChildren();
+  playheadElements.bass.length = 0;
   state.bassPattern.forEach((step, index) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -2524,6 +3059,7 @@ function renderBassSequencer() {
     flags.textContent = [step.active && step.accent ? "ACCENT" : "", step.active && step.slide ? "SLIDE" : ""].filter(Boolean).join(" · ");
     button.append(number, note, flags);
     dom.bassSequencer.append(button);
+    playheadElements.bass[index] = button;
   });
 }
 
@@ -2610,7 +3146,8 @@ function renderJunoArp() {
   if (gate) {
     const input = gate.querySelector("input");
     input.value = String(Math.round(arp.gate * 100));
-    gate.querySelector("output").textContent = `${Math.round(arp.gate * 100)}%`;
+    const raw = Number(syncCoalescedRange(input));
+    gate.querySelector("output").textContent = `${Math.round(raw)}%`;
     rangeFill(input);
   }
   if (dom.junoArpStatus) {
@@ -2645,6 +3182,7 @@ function junoStateValue(name, rawValue) {
 }
 
 function applyJunoControl(name, rawValue) {
+  if (diagnostics.enabled) diagnostics.recordControl(`J-4 ${name}`);
   state.juno[name] = junoStateValue(name, rawValue);
   // Attack defines future envelopes only; FILTER LFO owns only the shared
   // modulation depth, so neither route touches a voice cutoff envelope.
@@ -2656,6 +3194,7 @@ function applyJunoControl(name, rawValue) {
 }
 
 function applyJunoArpGate(rawValue) {
+  if (diagnostics.enabled) diagnostics.recordControl("J-4 ARP GATE");
   state.juno.arp.gate = Number(rawValue) / 100;
 }
 
@@ -2682,7 +3221,8 @@ function renderJunoControls() {
       : ["sub", "pulseWidth", "pwmAmount", "sustain", "lfoPitch", "lfoFilter"].includes(name) ? state.juno[name] * 100
         : name === "lfoRate" ? state.juno[name] * 100 : state.juno[name];
     input.value = String(raw);
-    control.querySelector("output").textContent = formatJunoOutput(name, raw);
+    const effectiveRaw = syncCoalescedRange(input);
+    control.querySelector("output").textContent = formatJunoOutput(name, effectiveRaw);
     rangeFill(input);
   });
   renderJunoVoiceLeds();
@@ -2727,10 +3267,14 @@ function bindJunoControls() {
     });
   });
   const arpGate = [...document.querySelectorAll("[data-juno-arp-gate]")][0];
-  if (arpGate) arpGate.querySelector("input").addEventListener("input", (event) => {
-    applyJunoArpGate(event.target.value);
-    renderJunoArp();
-  });
+  if (arpGate) {
+    const input = arpGate.querySelector("input");
+    const output = arpGate.querySelector("output");
+    bindCoalescedRange(input, applyJunoArpGate, (raw) => {
+      output.textContent = `${Math.round(Number(raw))}%`;
+      rangeFill(input);
+    });
+  }
   document.querySelectorAll("[data-juno-toggle]").forEach((button) => {
     button.addEventListener("click", () => {
       const name = button.dataset.junoToggle;
@@ -2762,9 +3306,7 @@ function bindJunoControls() {
   document.querySelectorAll("[data-juno-control]").forEach((control) => {
     const input = control.querySelector("input");
     const name = control.dataset.junoControl;
-    input.addEventListener("input", () => {
-      const raw = Number(input.value);
-      applyJunoControl(name, raw);
+    bindCoalescedRange(input, (raw) => applyJunoControl(name, Number(raw)), (raw) => {
       control.querySelector("output").textContent = formatJunoOutput(name, raw);
       rangeFill(input);
     });
@@ -2847,26 +3389,63 @@ function releaseAllComputerJunoKeys() {
 }
 
 function renderPlayhead(step) {
+  const diagnosticStartedAt = diagnostics.begin();
+  const previousStep = renderedPlayheadStep;
+  if (previousStep === step) {
+    diagnostics.end("playheadRender", diagnosticStartedAt);
+    return;
+  }
   state.currentStep = step;
-  document.querySelectorAll(".position-led").forEach((led) => led.classList.toggle("is-current", Number(led.dataset.step) === step));
-  document.querySelectorAll(".drum-step").forEach((button) => button.classList.toggle("is-current", Number(button.dataset.step) === step));
-  document.querySelectorAll(".bass-step").forEach((button) => button.classList.toggle("is-current", Number(button.dataset.bassStep) === step));
+  playheadElements.position[previousStep]?.classList.remove("is-current");
+  playheadElements.bass[previousStep]?.classList.remove("is-current");
+  TRACKS.forEach(({ id }) => playheadElements.drums[id][previousStep]?.classList.remove("is-current"));
+  playheadElements.position[step]?.classList.add("is-current");
+  playheadElements.bass[step]?.classList.add("is-current");
+  TRACKS.forEach(({ id }) => playheadElements.drums[id][step]?.classList.add("is-current"));
+  renderedPlayheadStep = step;
   dom.beatCounter.textContent = `${Math.floor(step / 4) + 1}.${(step % 4) + 1}`;
+  diagnostics.end("playheadRender", diagnosticStartedAt);
 }
 
 function clearPlayhead() {
   state.currentStep = -1;
-  document.querySelectorAll(".is-current").forEach((element) => element.classList.remove("is-current"));
+  playheadElements.position[renderedPlayheadStep]?.classList.remove("is-current");
+  playheadElements.bass[renderedPlayheadStep]?.classList.remove("is-current");
+  TRACKS.forEach(({ id }) => playheadElements.drums[id][renderedPlayheadStep]?.classList.remove("is-current"));
+  renderedPlayheadStep = -1;
   dom.beatCounter.textContent = "1.1";
 }
 
 function queuePlayhead(step, audioTime) {
-  const delay = Math.max(0, (audioTime - engine.ctx.currentTime) * 1000);
-  const timer = window.setTimeout(() => {
-    playheadTimers.delete(timer);
-    if (state.playing) renderPlayhead(step);
-  }, delay);
-  playheadTimers.add(timer);
+  if (pendingPlayheadCount === PLAYHEAD_QUEUE_SIZE) {
+    pendingPlayheadRead = (pendingPlayheadRead + 1) % PLAYHEAD_QUEUE_SIZE;
+    pendingPlayheadCount -= 1;
+  }
+  pendingPlayheadSteps[pendingPlayheadWrite] = step;
+  pendingPlayheadTimes[pendingPlayheadWrite] = audioTime;
+  pendingPlayheadWrite = (pendingPlayheadWrite + 1) % PLAYHEAD_QUEUE_SIZE;
+  pendingPlayheadCount += 1;
+  if (playheadAnimationFrame === null) playheadAnimationFrame = window.requestAnimationFrame(flushPlayhead);
+}
+
+function flushPlayhead(timestamp) {
+  playheadAnimationFrame = null;
+  diagnostics.recordAnimationFrame(timestamp);
+  if (!state.playing || !engine.ctx) {
+    pendingPlayheadRead = 0;
+    pendingPlayheadWrite = 0;
+    pendingPlayheadCount = 0;
+    return;
+  }
+  let step = -1;
+  const visualLead = 0.012;
+  while (pendingPlayheadCount > 0 && pendingPlayheadTimes[pendingPlayheadRead] <= engine.ctx.currentTime + visualLead) {
+    step = pendingPlayheadSteps[pendingPlayheadRead];
+    pendingPlayheadRead = (pendingPlayheadRead + 1) % PLAYHEAD_QUEUE_SIZE;
+    pendingPlayheadCount -= 1;
+  }
+  if (step >= 0) renderPlayhead(step);
+  if (pendingPlayheadCount > 0) playheadAnimationFrame = window.requestAnimationFrame(flushPlayhead);
 }
 
 function resetSnareBreak() {
@@ -2964,8 +3543,8 @@ function chooseArpNote(notes) {
   return note;
 }
 
-function scheduleArpeggiator(now, horizon) {
-  if (!state.juno.arp.enabled) return;
+function scheduleArpeggiator(now, horizon, collectEventCount = false) {
+  if (!state.juno.arp.enabled) return 0;
   const interval = getArpInterval();
   const earliest = now + 0.005;
   if (!nextArpTime) resetArpClock();
@@ -2974,32 +3553,52 @@ function scheduleArpeggiator(now, horizon) {
     nextArpTime += missed * interval;
     arpStepIndex += missed;
   }
+  let scheduledEvents = 0;
   while (nextArpTime < horizon) {
     const notes = getJunoArpNotes();
     const midi = chooseArpNote(notes);
-    if (midi !== null) engine.scheduleJunoNote(midi, nextArpTime, interval * state.juno.arp.gate, false, "arp", interval);
+    if (midi !== null) {
+      engine.scheduleJunoNote(midi, nextArpTime, interval * state.juno.arp.gate, false, "arp", interval);
+      if (collectEventCount) scheduledEvents += 1;
+    }
     nextArpTime += interval;
   }
+  return scheduledEvents;
 }
 
 function scheduler() {
   if (!state.playing || !engine.ctx) return;
   const now = engine.ctx.currentTime;
+  if (diagnostics.enabled) diagnostics.captureAudioClock(engine);
   const earliest = now + 0.005;
+  const diagnosticsEnabled = diagnostics.enabled;
+  const latenessMs = diagnosticsEnabled ? Math.max(0, now - nextStepTime) * 1000 : 0;
+  let skippedSteps = 0;
   if (nextStepTime < earliest) {
     // UI work can delay this timer. Skip expired beats instead of firing every
     // missed note simultaneously, keeping the original tempo and swing phase.
     const barDuration = 60 / state.bpm * 4;
-    nextStepTime += Math.floor((earliest - nextStepTime) / barDuration) * barDuration;
-    while (nextStepTime < earliest) advanceStep();
+    const skippedBars = Math.floor((earliest - nextStepTime) / barDuration);
+    nextStepTime += skippedBars * barDuration;
+    if (diagnosticsEnabled) skippedSteps += skippedBars * 16;
+    while (nextStepTime < earliest) {
+      advanceStep();
+      if (diagnosticsEnabled) skippedSteps += 1;
+    }
     previousStepHadBass = false;
     previousBassMidi = null;
   }
+  let scheduledEvents = 0;
   while (nextStepTime < now + 0.11) {
     scheduleStep(stepToSchedule, nextStepTime);
+    if (diagnosticsEnabled) scheduledEvents += 1;
     advanceStep();
   }
-  scheduleArpeggiator(now, now + 0.11);
+  const arpEvents = scheduleArpeggiator(now, now + 0.11, diagnosticsEnabled);
+  if (diagnosticsEnabled) {
+    scheduledEvents += arpEvents;
+    diagnostics.recordScheduler(now, latenessMs, skippedSteps, Math.max(0, nextStepTime - now) * 1000, scheduledEvents);
+  }
 }
 
 async function requestWakeLock() {
@@ -3034,6 +3633,7 @@ async function startTransport() {
   try {
     await engine.init();
     if (request !== transportRequest) return;
+    diagnostics.resetAudioClockReference(engine);
     engine.stopVoices(false);
     engine.updateAllEffectSends();
     state.playing = true;
@@ -3049,6 +3649,8 @@ async function startTransport() {
     scheduler();
     schedulerTimer = window.setInterval(scheduler, 25);
     updateTransportUI();
+    refreshVisualVisibility();
+    updateMeterAnimation();
     renderJunoArp();
     requestWakeLock();
   } catch (error) {
@@ -3069,17 +3671,22 @@ function stopTransport() {
   engine.stopVoices();
   if (schedulerTimer) window.clearInterval(schedulerTimer);
   schedulerTimer = null;
-  playheadTimers.forEach((timer) => window.clearTimeout(timer));
-  playheadTimers.clear();
+  if (playheadAnimationFrame !== null) window.cancelAnimationFrame(playheadAnimationFrame);
+  playheadAnimationFrame = null;
+  pendingPlayheadRead = 0;
+  pendingPlayheadWrite = 0;
+  pendingPlayheadCount = 0;
   clearPlayhead();
   updateTransportUI();
+  refreshVisualVisibility();
+  updateMeterAnimation();
   renderJunoArp();
   renderDirectControls();
   releaseWakeLock();
 }
 
 function switchTab(tabName) {
-  if (activeTab === "juno" && tabName !== "juno") releaseAllComputerJunoKeys();
+  const diagnosticStartedAt = diagnostics.begin();
   activeTab = tabName;
   const tabs = [...document.querySelectorAll(".tab-button")];
   tabs.forEach((tab) => {
@@ -3094,7 +3701,11 @@ function switchTab(tabName) {
     panel.hidden = !active;
   });
   if (tabName === "directo") renderDirectControls();
+  if (tabName === "juno") renderJunoControls();
+  if (tabName === "synth") renderSynthControls();
+  refreshVisualVisibility();
   updateMeterAnimation();
+  diagnostics.end("tabSwitch", diagnosticStartedAt);
 }
 
 function showToast(message) {
@@ -3245,6 +3856,35 @@ function applySynthControl(name, rawValue) {
   if (["cutoff", "envAmount"].includes(name)) engine.updateAutoCutoff();
 }
 
+function synthControlRawValue(name, value) {
+  if (["attack", "decay", "release", "glide"].includes(name)) return value * 1000;
+  if (["sustain", "sub", "drive"].includes(name)) return value * 100;
+  return value;
+}
+
+function renderSynthControl(control, rawValue, synchronize = false) {
+  const input = control.querySelector("input");
+  const output = control.querySelector("output");
+  const name = control.dataset.control;
+  let effectiveRaw = rawValue;
+  if (synchronize) {
+    input.value = String(rawValue);
+    effectiveRaw = syncCoalescedRange(input);
+  }
+  const value = Number(effectiveRaw);
+  output.textContent = formatSynthOutput(name, value);
+  const percent = (value - Number(input.min)) / (Number(input.max) - Number(input.min));
+  control.style.setProperty("--dial-angle", `${-125 + percent * 250}deg`);
+  rangeFill(input);
+}
+
+function renderSynthControls() {
+  document.querySelectorAll(".dial-control").forEach((control) => {
+    const name = control.dataset.control;
+    renderSynthControl(control, synthControlRawValue(name, state.synth[name]), true);
+  });
+}
+
 function bindSynthControls() {
   document.querySelectorAll(".wave-key").forEach((button) => {
     button.addEventListener("click", () => {
@@ -3261,19 +3901,15 @@ function bindSynthControls() {
 
   document.querySelectorAll(".dial-control").forEach((control) => {
     const input = control.querySelector("input");
-    const output = control.querySelector("output");
     const name = control.dataset.control;
-    const update = () => {
-      const raw = Number(input.value);
-      applySynthControl(name, raw);
-      output.textContent = formatSynthOutput(name, raw);
-      const percent = (raw - Number(input.min)) / (Number(input.max) - Number(input.min));
-      control.style.setProperty("--dial-angle", `${-125 + percent * 250}deg`);
-      rangeFill(input);
+    const update = (raw) => {
+      applySynthControl(name, Number(raw));
     };
-    input.addEventListener("input", update);
-    update();
+    bindCoalescedRange(input, update, (raw) => renderSynthControl(control, raw));
   });
+  // State is authoritative: browsers may restore an old form value before
+  // this binding runs, but it must not overwrite the current synth state.
+  renderSynthControls();
 
   const autoToggle = document.getElementById("autoCutoffToggle");
   const autoAmount = document.getElementById("autoCutoffAmount");
@@ -3300,11 +3936,12 @@ function bindSynthControls() {
       renderAutoCutoff();
     });
   });
-  autoAmount.addEventListener("input", () => {
-    state.synth.autoCutoffAmount = Number(autoAmount.value) / 100;
-    rangeFill(autoAmount);
+  bindCoalescedRange(autoAmount, (raw) => {
+    state.synth.autoCutoffAmount = Number(raw) / 100;
     engine.updateAutoCutoff();
-    renderAutoCutoff();
+  }, (raw) => {
+    document.getElementById("autoCutoffAmountValue").textContent = `${Math.round(Number(raw))}%`;
+    rangeFill(autoAmount);
   });
   rangeFill(autoAmount);
   renderAutoCutoff();
@@ -3374,6 +4011,7 @@ function renderFxParameters() {
     const name = control.dataset.fxControl;
     const raw = fxControlRawValue(name, fx[name]);
     input.value = String(raw);
+    syncCoalescedRange(input);
     control.querySelector("output").textContent = name === "delayTime" && fx.delayTiming === "sync"
       ? `${fx.delayDivision} · ${Math.round(getDelaySeconds(fx) * 1000)} ms`
       : fxOutput(name, raw);
@@ -3423,6 +4061,7 @@ function renderFxChannel() {
     const input = control.querySelector("input");
     const raw = Math.round(state.fx.sends[channelId][effect] * 100);
     input.value = String(raw);
+    syncCoalescedRange(input);
     control.querySelector("output").textContent = `${raw}%`;
     rangeFill(input);
   });
@@ -3496,27 +4135,29 @@ function bindEffects() {
     const output = control.querySelector("output");
     const name = control.dataset.fxControl;
     const effect = FX_NAMES.find((candidate) => name.startsWith(candidate));
-    const update = () => {
-      const raw = Number(input.value);
-      getChannelFxState()[name] = fxStateValue(name, raw);
-      output.textContent = fxOutput(name, raw);
-      rangeFill(input);
+    const update = (raw) => {
+      getChannelFxState()[name] = fxStateValue(name, Number(raw));
       engine.updateEffect(effect);
     };
-    input.addEventListener("input", update);
-    update();
+    const renderValue = (raw) => {
+      output.textContent = fxOutput(name, raw);
+      rangeFill(input);
+    };
+    bindCoalescedRange(input, update, renderValue);
+    renderValue(input.value);
   });
 
   document.querySelectorAll("[data-fx-send]").forEach((control) => {
     const input = control.querySelector("input");
     const effect = control.dataset.fxSend;
-    input.addEventListener("input", () => {
+    const output = control.querySelector("output");
+    bindCoalescedRange(input, (raw) => {
       const channelId = state.selectedFxChannel;
-      const raw = Number(input.value);
       state.fx.sends[channelId][effect] = raw / 100;
-      control.querySelector("output").textContent = `${Math.round(raw)}%`;
-      rangeFill(input);
       engine.updateEffectSend(channelId, effect);
+    }, (raw) => {
+      output.textContent = `${Math.round(Number(raw))}%`;
+      rangeFill(input);
     });
   });
 
@@ -3554,6 +4195,7 @@ function renderProcessor() {
     const output = control.querySelector("output");
     const value = processor[name];
     input.value = String(value);
+    syncCoalescedRange(input);
     output.textContent = formatProcessorOutput(name, value);
     rangeFill(input);
     if (control.classList.contains("large-dial-control")) {
@@ -3564,6 +4206,7 @@ function renderProcessor() {
 }
 
 function renderReductionMeter() {
+  const diagnosticStartedAt = diagnostics.begin();
   const compressor = engine.channels[state.selectedProcessorChannel]?.compressor;
   const reduction = compressor ? clamp(Math.abs(Number(compressor.reduction) || 0), 0, 24) : 0;
   dom.reductionMeterBar.style.height = `${reduction / 24 * 100}%`;
@@ -3574,7 +4217,10 @@ function renderReductionMeter() {
   dom.masterReductionBar.style.width = `${masterReduction / 24 * 100}%`;
   dom.masterReductionValue.textContent = `${masterReduction.toFixed(1)} dB`;
 
-  if (!engine.analyser) return;
+  if (!engine.analyser) {
+    diagnostics.end("meterRender", diagnosticStartedAt);
+    return;
+  }
   const size = engine.analyser.fftSize;
   let peak = 0;
   if (typeof engine.analyser.getFloatTimeDomainData === "function") {
@@ -3591,6 +4237,7 @@ function renderReductionMeter() {
   dom.masterPeakValue.textContent = Number.isFinite(peakDb) ? `${peakDb.toFixed(1)} dBFS` : "−∞ dBFS";
   if (peak >= 1) masterClipHoldUntil = performance.now() + 900;
   dom.masterClipLamp.classList.toggle("is-clipping", performance.now() < masterClipHoldUntil);
+  diagnostics.end("meterRender", diagnosticStartedAt);
 }
 
 function formatMasterOutput(name, value) {
@@ -3603,15 +4250,27 @@ function masterRawValue(name, value) {
   return ["limiterAttack", "limiterRelease"].includes(name) ? value * 1000 : value;
 }
 
-function setMasterVolume(rawValue) {
-  const raw = clamp(Number(rawValue), 0, 100);
-  state.master = raw / 100;
+function renderMasterVolume(rawValue = state.master * 100) {
+  let raw = clamp(Number(rawValue), 0, 100);
   dom.master.value = String(raw);
   dom.masterOutput.value = String(raw);
+  syncCoalescedRange(dom.master);
+  syncCoalescedRange(dom.masterOutput);
+  raw = clamp(state.master * 100, 0, 100);
+  dom.master.value = String(raw);
+  dom.masterOutput.value = String(raw);
+  syncCoalescedRange(dom.master);
+  syncCoalescedRange(dom.masterOutput);
   dom.masterValue.textContent = `${Math.round(raw)}%`;
   dom.masterOutputValue.textContent = `${Math.round(raw)}%`;
   rangeFill(dom.master);
   rangeFill(dom.masterOutput);
+}
+
+function setMasterVolume(rawValue) {
+  const raw = clamp(Number(rawValue), 0, 100);
+  state.master = raw / 100;
+  renderMasterVolume(raw);
   engine.updateMaster();
 }
 
@@ -3629,10 +4288,11 @@ function renderMasterProcessor() {
     const raw = masterRawValue(name, master[name]);
     const input = control.querySelector("input");
     input.value = String(raw);
+    syncCoalescedRange(input);
     control.querySelector("output").textContent = formatMasterOutput(name, raw);
     rangeFill(input);
   });
-  setMasterVolume(state.master * 100);
+  renderMasterVolume();
 }
 
 function bindMasterProcessor() {
@@ -3649,15 +4309,23 @@ function bindMasterProcessor() {
   document.querySelectorAll("[data-master-control]").forEach((control) => {
     const input = control.querySelector("input");
     const name = control.dataset.masterControl;
-    input.addEventListener("input", () => {
-      const raw = Number(input.value);
-      state.masterProcessor[name] = ["limiterAttack", "limiterRelease"].includes(name) ? raw / 1000 : raw;
-      control.querySelector("output").textContent = formatMasterOutput(name, raw);
-      rangeFill(input);
+    const output = control.querySelector("output");
+    bindCoalescedRange(input, (raw) => {
+      const value = Number(raw);
+      state.masterProcessor[name] = ["limiterAttack", "limiterRelease"].includes(name) ? value / 1000 : value;
       engine.updateMasterProcessor();
+    }, (raw) => {
+      const value = Number(raw);
+      output.textContent = formatMasterOutput(name, value);
+      rangeFill(input);
     });
   });
-  dom.masterOutput.addEventListener("input", () => setMasterVolume(dom.masterOutput.value));
+  bindCoalescedRange(dom.masterOutput, setMasterVolume, (raw) => {
+    const value = Math.round(Number(raw));
+    dom.masterValue.textContent = `${value}%`;
+    dom.masterOutputValue.textContent = `${value}%`;
+    rangeFill(dom.masterOutput);
+  });
   renderMasterProcessor();
 }
 
@@ -3675,17 +4343,21 @@ function bindChannelProcessor() {
   document.querySelectorAll("[data-processor-control]").forEach((control) => {
     const input = control.querySelector("input");
     const name = control.dataset.processorControl;
-    input.addEventListener("input", () => {
-      const value = Number(input.value);
-      state.processors[state.selectedProcessorChannel][name] = value;
-      control.querySelector("output").textContent = formatProcessorOutput(name, value);
+    const output = control.querySelector("output");
+    const renderValue = (raw) => {
+      const value = Number(raw);
+      output.textContent = formatProcessorOutput(name, value);
       rangeFill(input);
       if (control.classList.contains("large-dial-control")) {
         const percent = (value - Number(input.min)) / (Number(input.max) - Number(input.min));
         control.style.setProperty("--dial-angle", `${-125 + percent * 250}deg`);
       }
+    };
+    bindCoalescedRange(input, (raw) => {
+      const value = Number(raw);
+      state.processors[state.selectedProcessorChannel][name] = value;
       engine.updateProcessor(state.selectedProcessorChannel);
-    });
+    }, renderValue);
   });
 
   renderProcessor();
@@ -3711,8 +4383,20 @@ function bindMixer() {
       rangeFill(pan);
       engine.updateChannel(channel);
     };
-    volume.addEventListener("input", updateVolume);
-    pan.addEventListener("input", updatePan);
+    bindCoalescedRange(volume, (raw) => {
+      state.levels[channel] = Number(raw) / 100;
+      engine.updateChannel(channel);
+    }, () => {
+      levelOutput.textContent = String(volume.value);
+      rangeFill(volume);
+    });
+    bindCoalescedRange(pan, (raw) => {
+      state.pans[channel] = Number(raw) / 100;
+      engine.updateChannel(channel);
+    }, () => {
+      panOutput.textContent = panLabel(Number(pan.value) / 100);
+      rangeFill(pan);
+    });
     updateVolume();
     updatePan();
   });
@@ -3725,7 +4409,7 @@ function bindMixer() {
   toneBindings.forEach(([id, setter]) => {
     const input = document.getElementById(id);
     const update = () => { setter(input.value); rangeFill(input); };
-    input.addEventListener("input", update);
+    bindCoalescedRange(input, (value) => setter(value), () => rangeFill(input));
     update();
   });
 }
@@ -3738,13 +4422,26 @@ function bindTransport() {
   dom.bpm.addEventListener("change", () => setBpm(dom.bpm.value));
   dom.bpm.addEventListener("blur", () => setBpm(dom.bpm.value));
 
-  dom.swing.addEventListener("input", () => {
-    state.swing = Number(dom.swing.value);
-    dom.swingValue.textContent = `${state.swing}%`;
+  bindCoalescedRange(dom.swing, (raw) => {
+    state.swing = Number(raw);
+  }, (raw) => {
+    dom.swingValue.textContent = `${Math.round(Number(raw))}%`;
     rangeFill(dom.swing);
   });
 
-  dom.master.addEventListener("input", () => setMasterVolume(dom.master.value));
+  bindCoalescedRange(dom.master, setMasterVolume, (raw) => {
+    const value = Math.round(Number(raw));
+    dom.masterValue.textContent = `${value}%`;
+    dom.masterOutputValue.textContent = `${value}%`;
+    rangeFill(dom.master);
+  });
+
+  // Form-state restoration must never override the JavaScript source of truth.
+  dom.swing.value = String(state.swing);
+  syncCoalescedRange(dom.swing);
+  dom.swingValue.textContent = `${Math.round(state.swing)}%`;
+  rangeFill(dom.swing);
+  renderMasterVolume();
 
   document.getElementById("tapTempo").addEventListener("click", () => {
     const now = performance.now();
@@ -3784,6 +4481,7 @@ function bindTabs() {
 }
 
 function renderDirectControls() {
+  const diagnosticStartedAt = diagnostics.begin();
   const values = {
     bassCutoff: state.synth.cutoff,
     junoCutoff: state.juno.cutoff,
@@ -3796,9 +4494,10 @@ function renderDirectControls() {
     const raw = values[name];
     const input = control.querySelector("input");
     input.value = String(raw);
-    control.querySelector("output").textContent = name === "bassCutoff" ? formatSynthOutput("cutoff", raw)
-      : name === "junoArpGate" ? `${Math.round(raw)}%`
-        : formatJunoOutput(name === "junoCutoff" ? "cutoff" : name === "junoResonance" ? "resonance" : "lfoFilter", raw);
+    const effectiveRaw = syncCoalescedRange(input);
+    control.querySelector("output").textContent = name === "bassCutoff" ? formatSynthOutput("cutoff", effectiveRaw)
+      : name === "junoArpGate" ? `${Math.round(Number(effectiveRaw))}%`
+        : formatJunoOutput(name === "junoCutoff" ? "cutoff" : name === "junoResonance" ? "resonance" : "lfoFilter", effectiveRaw);
     rangeFill(input);
   });
   document.querySelectorAll("[data-direct-mute]").forEach((button) => {
@@ -3829,6 +4528,7 @@ function renderDirectControls() {
         : status === "cancelRequested" ? "CANCELACIÓN PENDIENTE"
           : "ARMAR";
   }
+  diagnostics.end("directRender", diagnosticStartedAt);
 }
 
 function toggleDirectMute(group) {
@@ -3837,13 +4537,23 @@ function toggleDirectMute(group) {
   renderDirectControls();
 }
 
+function updateDirectControlVisual(name, rawValue) {
+  const control = document.querySelector(`[data-direct-control="${name}"]`);
+  if (!control) return;
+  const input = control.querySelector("input");
+  const raw = Number(rawValue);
+  control.querySelector("output").textContent = name === "bassCutoff" ? formatSynthOutput("cutoff", raw)
+    : name === "junoArpGate" ? `${Math.round(raw)}%`
+      : formatJunoOutput(name === "junoCutoff" ? "cutoff" : name === "junoResonance" ? "resonance" : "lfoFilter", raw);
+  rangeFill(input);
+}
+
 function applyDirectControl(name, rawValue) {
   if (name === "bassCutoff") applySynthControl("cutoff", rawValue);
   else if (name === "junoCutoff") applyJunoControl("cutoff", rawValue);
   else if (name === "junoResonance") applyJunoControl("resonance", rawValue);
   else if (name === "junoArpGate") applyJunoArpGate(rawValue);
   else if (name === "junoLfoFilter") applyJunoControl("lfoFilter", rawValue);
-  renderDirectControls();
 }
 
 function requestSnareBreak() {
@@ -3865,7 +4575,9 @@ function requestSnareBreak() {
 
 function bindDirectControls() {
   document.querySelectorAll("[data-direct-control]").forEach((control) => {
-    control.querySelector("input").addEventListener("input", (event) => applyDirectControl(control.dataset.directControl, event.target.value));
+    const input = control.querySelector("input");
+    const name = control.dataset.directControl;
+    bindCoalescedRange(input, (raw) => applyDirectControl(name, raw), (raw) => updateDirectControlVisual(name, raw));
   });
   document.querySelectorAll("[data-direct-mute]").forEach((button) => {
     button.addEventListener("click", () => toggleDirectMute(button.dataset.directMute));
@@ -3887,7 +4599,8 @@ function bindDirectControls() {
 }
 
 function drawScopeFrame() {
-  if (activeTab !== "synth" || document.visibilityState !== "visible") return;
+  if (!visualVisibility.scope || getVisualMode() === "mobile-performance") return;
+  const diagnosticStartedAt = diagnostics.begin();
   const canvas = dom.canvas;
   const context = canvas.getContext("2d");
   const width = canvas.width;
@@ -3933,19 +4646,72 @@ function drawScopeFrame() {
   }
   context.stroke();
   context.shadowBlur = 0;
+  diagnostics.end("scopeRender", diagnosticStartedAt);
 }
 
-function metersVisible() {
-  return document.visibilityState === "visible" && (activeTab === "synth" || activeTab === "mixer");
+function hasUsefulDimensions(element) {
+  if (!element || element.hidden) return false;
+  const target = element.parentElement || element;
+  const width = Number(target.clientWidth || target.width || 0);
+  const height = Number(target.clientHeight || target.height || 0);
+  return width > 0 && height > 0;
+}
+
+function getVisualMode() {
+  return state.playing && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches
+    ? "mobile-performance" : "desktop";
+}
+
+function refreshVisualVisibility() {
+  const appVisible = document.visibilityState === "visible";
+  const contextRunning = engine.ctx?.state === "running";
+  // Desktop visuals may show preview audio and let peak/clip state decay after
+  // STOP. The coarse-pointer performance profile is stricter only while PLAY.
+  const desktopPreviewEligible = getVisualMode() === "desktop" && contextRunning;
+  const visualEligible = appVisible && (state.playing || desktopPreviewEligible);
+  visualVisibility.scope = visualEligible && activeTab === "synth" && hasUsefulDimensions(dom.canvas);
+  visualVisibility.meter = visualEligible && activeTab === "mixer" && hasUsefulDimensions(dom.reductionMeterBar);
+}
+
+function getVisualDiagnostics() {
+  return {
+    scopeActive: meterAnimationFrame !== null && visualVisibility.scope && getVisualMode() === "desktop",
+    meterActive: meterAnimationFrame !== null && visualVisibility.meter,
+    scopeVisible: visualVisibility.scope,
+    meterVisible: visualVisibility.meter,
+  };
+}
+
+function activeVisualKind() {
+  if (visualVisibility.scope) return "scope";
+  if (visualVisibility.meter) return "meter";
+  return null;
 }
 
 function scopeLoop(timestamp) {
   meterAnimationFrame = null;
-  if (!metersVisible()) return;
-  if (timestamp - lastMeterFrame >= 1000 / 30) {
-    if (activeTab === "synth") drawScopeFrame();
+  if (document.visibilityState !== "visible" || engine.ctx?.state !== "running") {
+    diagnostics.recordVisualSkip(activeTab === "synth" ? "scope" : "meter", "visibility");
+    return;
+  }
+  const kind = activeVisualKind();
+  if (!kind) {
+    diagnostics.recordVisualSkip(activeTab === "synth" ? "scope" : "meter", "visibility");
+    return;
+  }
+  if (kind === "scope" && getVisualMode() === "mobile-performance") {
+    diagnostics.recordVisualSkip("scope", "visibility");
+    return;
+  }
+  diagnostics.recordAnimationFrame(timestamp);
+  const fps = kind === "meter" && getVisualMode() === "mobile-performance" ? 10 : 30;
+  if (timestamp - lastMeterFrame >= 1000 / fps) {
+    if (kind === "scope") drawScopeFrame();
     else renderReductionMeter();
+    diagnostics.recordVisualFrame(kind);
     lastMeterFrame = timestamp;
+  } else if (kind === "meter") {
+    diagnostics.recordVisualSkip("meter", "rate");
   }
   meterAnimationFrame = window.requestAnimationFrame(scopeLoop);
 }
@@ -3954,14 +4720,120 @@ function updateMeterAnimation() {
   if (meterAnimationFrame !== null) window.cancelAnimationFrame(meterAnimationFrame);
   meterAnimationFrame = null;
   lastMeterFrame = -Infinity;
-  if (metersVisible()) meterAnimationFrame = window.requestAnimationFrame(scopeLoop);
+  const kind = activeVisualKind();
+  if (!kind || (kind === "scope" && getVisualMode() === "mobile-performance")) return;
+  meterAnimationFrame = window.requestAnimationFrame(scopeLoop);
+}
+
+async function resumeAudioContext(audioEngine, reason) {
+  await audioEngine.ctx.resume();
+  diagnostics.recordAudioState(audioEngine, reason);
+  diagnostics.resetAudioClockReference(audioEngine);
+  // A hidden/suspended context stops the visual RAF. Re-evaluate only after
+  // resume succeeds, so ineligible panels remain paused and no RAF is doubled.
+  refreshVisualVisibility();
+  updateMeterAnimation();
+}
+
+async function handleVisibilityChange() {
+  diagnostics.recordVisibility(engine);
+  refreshVisualVisibility();
+  updateMeterAnimation();
+  if (document.visibilityState !== "visible") {
+    // Internal tabs do not release keys; actual document invisibility does.
+    releaseAllComputerJunoKeys();
+    return;
+  }
+  if (document.visibilityState === "visible" && state.playing) {
+    if (engine.ctx?.state === "suspended") {
+      try {
+        await resumeAudioContext(engine, "visibility-resume");
+      } catch {
+        diagnostics.recordAudioState(engine, "visibility-resume-rejected");
+      }
+    } else diagnostics.resetAudioClockReference(engine);
+    requestWakeLock();
+  }
 }
 
 function handlePageHide() {
   stopTransport();
   if (meterAnimationFrame !== null) window.cancelAnimationFrame(meterAnimationFrame);
   meterAnimationFrame = null;
-  if (engine.ctx?.state === "running") engine.ctx.suspend().catch(() => {});
+  if (engine.ctx?.state === "running") {
+    engine.ctx.suspend()
+      .then(() => diagnostics.recordAudioState(engine, "pagehide-suspend"))
+      .catch(() => diagnostics.recordAudioState(engine, "pagehide-suspend-rejected"));
+  }
+}
+
+function diagnosticsPanelRequested() {
+  return typeof location !== "undefined" && /(?:^|[?&])diag=1(?:&|$)/.test(location.search || "");
+}
+
+function formatDiagnosticMetric([name, metric]) {
+  return `${name}: n=${metric.count} min=${metric.min.toFixed(1)} ms p50=${metric.p50.toFixed(1)} ms p95=${metric.p95.toFixed(1)} ms max=${metric.max.toFixed(1)} ms`;
+}
+
+function refreshDiagnosticsPanel() {
+  const output = document.getElementById("diagnosticsOutput");
+  if (!output) return;
+  diagnostics.captureAudioClock(engine);
+  const signal = engine.captureDiagnosticSignal();
+  const snapshot = diagnostics.snapshot(engine);
+  if (!snapshot.enabled) {
+    output.textContent = "Diagnóstico apagado.";
+    return;
+  }
+  output.textContent = [
+    `ctx=${snapshot.audioContextState} visible=${snapshot.visibilityState} FX activos=${snapshot.fxActive}`,
+    `ticks=${snapshot.totals.schedulerTicks} pasos omitidos totales=${snapshot.totals.skippedSteps} eventos=${snapshot.totals.scheduledEvents} input=${snapshot.totals.inputEvents} long tasks=${snapshot.totals.longTasks} visibilidad=${snapshot.totals.visibilityChanges}`,
+    `visual=${snapshot.visualMode} scope=${snapshot.visuals.scopeActive ? "activo" : "pausado"} medidor=${snapshot.visuals.meterActive ? "activo" : "pausado"} frames scope=${snapshot.totals.scopeFrames} medidor=${snapshot.totals.meterFrames} descartados scope=${snapshot.totals.scopeSkippedVisibility} medidor-visible=${snapshot.totals.meterSkippedVisibility} medidor-fps=${snapshot.totals.meterSkippedRate}`,
+    ...snapshot.scheduler.map(formatDiagnosticMetric),
+    ...snapshot.ui.map(formatDiagnosticMetric),
+    `audioClockDelta (deriva relativa desde PLAY/resume): n=${snapshot.audioClock.count} p95=${snapshot.audioClock.p95.toFixed(1)} ms max=${snapshot.audioClock.max.toFixed(1)} ms`,
+    ...snapshot.timing.map(formatDiagnosticMetric),
+    `último control=${snapshot.lastControl} · estado audio=${snapshot.lastAudioState.state} (${snapshot.lastAudioState.reason}) · salto reloj=${snapshot.clock.lastJumpMs.toFixed(1)} ms @${snapshot.clock.lastJumpPerformance.toFixed(1)} · última long task=${snapshot.clock.lastLongTaskDuration.toFixed(1)} ms @${snapshot.clock.lastLongTaskPerformance.toFixed(1)}`,
+    `eventos: pasado=${snapshot.scheduling.past} horizonte=${snapshot.scheduling.inHorizon} futuro=${snapshot.scheduling.tooFar}`,
+    `output timestamp: current=${snapshot.clock.outputTimestamp.currentTime.toFixed(3)} context=${snapshot.clock.outputTimestamp.contextTime.toFixed(3)} perf=${snapshot.clock.outputTimestamp.performanceTime.toFixed(1)} now=${snapshot.clock.outputTimestamp.now.toFixed(1)} base=${snapshot.clock.outputTimestamp.baseLatency.toFixed(3)} output=${snapshot.clock.outputTimestamp.outputLatency.toFixed(3)}`,
+    ...(signal ? Object.entries(signal).map(([name, value]) => `${name}: rms=${value.rms.toFixed(5)} pico=${value.peak.toFixed(5)} finito=${value.finite ? "sí" : "NO"}`) : ["señal: no disponible"]),
+    ...Object.entries(snapshot.voices).map(([name, voice]) => `${name}: voces creadas=${voice.created} activas=${voice.active} limpias=${voice.cleaned}`),
+  ].join("\n");
+}
+
+function bindDiagnostics() {
+  const panel = document.getElementById("diagnosticsPanel");
+  if (!panel || !diagnosticsPanelRequested()) return;
+  if (!diagnosticsInputListenersInstalled) {
+    diagnosticsInputListenersInstalled = true;
+    document.addEventListener("input", () => {
+      diagnosticInputStartedAt = diagnostics.begin();
+    }, true);
+    document.addEventListener("input", () => {
+      diagnostics.recordInput(diagnosticInputStartedAt);
+    });
+  }
+  installDiagnosticContextListeners(engine);
+  panel.hidden = false;
+  const toggle = document.getElementById("diagnosticsToggle");
+  toggle?.addEventListener("click", () => {
+    if (diagnostics.enabled) {
+      engine.disposeDiagnosticTaps();
+      diagnostics.disable();
+    }
+    else diagnostics.enable(engine);
+    toggle.textContent = diagnostics.enabled ? "DETENER DIAGNÓSTICO" : "INICIAR DIAGNÓSTICO";
+    refreshDiagnosticsPanel();
+  });
+  document.getElementById("diagnosticsRefresh")?.addEventListener("click", refreshDiagnosticsPanel);
+}
+
+function installDiagnosticContextListeners(audioEngine) {
+  const context = audioEngine?.ctx;
+  if (!diagnosticsPanelRequested() || !context || diagnosticsContextWithListeners === context) return;
+  diagnosticsContextWithListeners = context;
+  context.addEventListener?.("statechange", () => diagnostics.recordAudioState(audioEngine, "statechange"));
+  context.addEventListener?.("error", () => diagnostics.recordAudioState(audioEngine, "error"));
 }
 
 function initialize() {
@@ -3980,20 +4852,23 @@ function initialize() {
   bindMixer();
   bindTransport();
   bindTabs();
+  bindDiagnostics();
   document.querySelectorAll("input[type='range']").forEach(rangeFill);
   updateTransportUI();
+  refreshVisualVisibility();
   updateMeterAnimation();
 
-  document.addEventListener("visibilitychange", () => {
-    updateMeterAnimation();
-    if (document.visibilityState === "visible" && state.playing) {
-      if (engine.ctx?.state === "suspended") engine.ctx.resume().catch(() => {});
-      requestWakeLock();
-    }
-  });
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 
   window.addEventListener("pagehide", handlePageHide);
-  window.addEventListener("pageshow", updateMeterAnimation);
+  window.addEventListener("pageshow", () => {
+    refreshVisualVisibility();
+    updateMeterAnimation();
+  });
+  window.addEventListener("resize", () => {
+    refreshVisualVisibility();
+    updateMeterAnimation();
+  });
 
   if ("serviceWorker" in navigator && location.protocol === "https:") {
     navigator.serviceWorker.register("./sw.js").catch(() => {});

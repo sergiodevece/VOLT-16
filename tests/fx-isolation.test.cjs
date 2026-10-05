@@ -180,7 +180,7 @@ function setup({ fxControls = [], delayModeButtons = [], delayTimingButtons = []
     performance: { now: () => 0 },
   });
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
-    globalThis.api = { state, engine, CHANNELS, FX_NAMES, bindEffects, renderFxChannel, setBpm, stopTransport, handlePageHide };
+    globalThis.api = { state, engine, CHANNELS, FX_NAMES, bindEffects, renderFxChannel, setBpm, stopTransport, handlePageHide, flushCoalescedControls };
   `, context);
   return {
     ...context.api,
@@ -396,7 +396,7 @@ test("FX controls edit and reload the selected channel's parameter values", () =
   const digital = prepareModeButton("delayMode", "digital");
   const room = prepareModeButton("reverbMode", "room");
   const hall = prepareModeButton("reverbMode", "hall");
-  const { state, bindEffects, renderFxChannel } = setup({
+  const { state, bindEffects, renderFxChannel, flushCoalescedControls } = setup({
     fxControls: [delayTime, reverbDamping],
     delayModeButtons: [tape, digital],
     reverbModeButtons: [room, hall],
@@ -415,6 +415,7 @@ test("FX controls edit and reload the selected channel's parameter values", () =
   assert.equal(reverbDamping.input.value, "3200");
   delayTime.inputValue(180);
   reverbDamping.inputValue(4100);
+  flushCoalescedControls();
   assert.equal(state.fx.channels.snare.delayTime, 0.18);
   assert.equal(state.fx.channels.snare.reverbDamping, 4100);
   assert.equal(state.fx.channels.bass.delayTime, 0.31);
@@ -428,6 +429,7 @@ test("FX controls edit and reload the selected channel's parameter values", () =
   assert.equal(room.active, true);
   digital.click();
   delayTime.inputValue(570);
+  flushCoalescedControls();
   assert.equal(state.fx.channels.bass.delayMode, "digital");
   assert.equal(state.fx.channels.bass.delayTime, 0.57);
 

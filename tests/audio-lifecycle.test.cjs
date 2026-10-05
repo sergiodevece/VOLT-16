@@ -115,43 +115,74 @@ function mockContext(sampleRate = 48000) {
   return ctx;
 }
 
-function setup({ junoControls = [], junoToggles = [] } = {}) {
-  const callbacks = new Map(); let nextId = 0;
+function setup({ junoControls = [], junoToggles = [], junoArpGates = [], synthControls = [], directControls = [], clock = { now: 0 }, PerformanceObserver = undefined, coarsePointer = false } = {}) {
+  const callbacks = new Map(); let nextId = 0; let timeoutCount = 0;
+  const windowListeners = new Map();
+  const queryCounts = new Map();
   const elements = new Map();
-  const element = () => ({ textContent: "", checked: false, hidden: false, children: [],
-    style: { setProperty() {} }, classList: { add() {}, toggle() {}, remove() {}, contains() { return false; } },
+  const element = () => {
+    const classes = new Set();
+    return { textContent: "", checked: false, hidden: false, children: [], width: 720, height: 230, clientWidth: 720, clientHeight: 230,
+      style: { setProperty() {} }, classList: {
+        add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
+        toggle(name, force) { const active = force === undefined ? !classes.has(name) : Boolean(force); if (active) classes.add(name); else classes.delete(name); return active; },
+        contains(name) { return classes.has(name); },
+      },
     setAttribute() {}, addEventListener() {}, querySelector() { return element(); },
     getContext() { return new Proxy({}, { get: () => () => {} }); },
-  });
+    };
+  };
   const ctx = mockContext();
   const document = { visibilityState: "visible",
     querySelectorAll(selector) {
+      queryCounts.set(selector, (queryCounts.get(selector) || 0) + 1);
       if (selector === "[data-juno-control]") return junoControls;
       if (selector === "[data-juno-toggle]") return junoToggles;
+      if (selector === "[data-juno-arp-gate]") return junoArpGates;
+      if (selector === ".dial-control") return synthControls;
+      if (selector === "[data-direct-control]") return directControls;
       return [];
+    },
+    querySelector(selector) {
+      const match = selector.match(/^\[data-direct-control="(.+)"\]$/);
+      return match ? directControls.find((control) => control.dataset.directControl === match[1]) : null;
     },
     addEventListener() {},
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); } };
   const window = { AudioContext: function () { return ctx; },
-    setTimeout(fn) { const id = ++nextId; callbacks.set(id, fn); return id; },
+    setTimeout(fn) { timeoutCount += 1; const id = ++nextId; callbacks.set(id, fn); return id; },
     clearTimeout(id) { callbacks.delete(id); },
     setInterval(fn) { const id = ++nextId; callbacks.set(id, fn); return id; },
     clearInterval(id) { callbacks.delete(id); },
     requestAnimationFrame(fn) { const id = ++nextId; callbacks.set(id, fn); return id; },
     cancelAnimationFrame(id) { callbacks.delete(id); },
-    addEventListener() {},
+    matchMedia() { return { matches: coarsePointer }; },
+    addEventListener(type, listener) {
+      if (!windowListeners.has(type)) windowListeners.set(type, []);
+      windowListeners.get(type).push(listener);
+    },
   };
-  const context = vm.createContext({ document, window, navigator: {}, console, performance: { now: () => 0 } });
+  if (PerformanceObserver !== undefined) window.PerformanceObserver = PerformanceObserver;
+  const context = vm.createContext({ document, window, navigator: {}, console, performance: { now: () => clock.now } });
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
-    globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
+    globalThis.api = { state, engine, diagnostics, scheduler, startTransport, stopTransport, switchTab, scopeLoop,
       queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
-      bindJunoControls, applyJunoControl, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
+      bindJunoControls, bindSynthControls, bindDirectControls, bindTransport, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
+      bindCoalescedRange, flushCoalescedControls, flushCoalescedControl, renderPlayhead, renderDirectControls, applyJunoControl,
+      renderJunoControls, renderSynthControls, handleVisibilityChange, refreshVisualVisibility, updateMeterAnimation, getVisualMode, getVisualDiagnostics, renderReductionMeter,
       buildArpSequence, scheduleArpeggiator,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
+      setSchedulerTimeline: (time, step) => { nextStepTime = time; stepToSchedule = step; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
-      getPlayheadTimerCount: () => playheadTimers.size ?? playheadTimers.length };
+      getPlayheadTimerCount: () => pendingPlayheadCount,
+      getPlayheadFrameActive: () => playheadAnimationFrame !== null,
+      getControlFrameActive: () => controlAnimationFrame !== null };
   `, context);
-  return { ...context.api, ctx, callbacks, document, elements };
+  return {
+    ...context.api, ctx, callbacks, document, elements, clock, queryCounts,
+    dispatchWindowEvent: (type, event = {}) => (windowListeners.get(type) || []).forEach((listener) => listener(event)),
+    getTimeoutCount: () => timeoutCount,
+  };
 }
 
 test("master topology keeps the creative EQ after the optional limiter and before output volume", async () => {
@@ -516,6 +547,7 @@ test("editing J-4 Attack preserves a held manual voice and its amp automation", 
     attackInput.value = String(raw);
     listeners.get("input")();
   });
+  listeners.get("pointerup")();
 
   assert.equal(state.juno.attack, 1.45, "Attack state uses the last slider value for future notes");
   assert.equal(updateVoiceCalls, 0, "Attack must not reconfigure active voices");
@@ -789,6 +821,89 @@ test("J-4 live controls write only their owning AudioParams", async () => {
   }
 });
 
+test("J-4 slider bursts coalesce to one selective update with the last value", async () => {
+  const listeners = new Map();
+  const input = {
+    min: "0", max: "16", value: "4.5", style: { setProperty() {} },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const control = {
+    dataset: { junoControl: "resonance" },
+    querySelector(selector) { return selector === "input" ? input : { textContent: "" }; },
+  };
+  const api = setup({ junoControls: [control] });
+  await api.engine.init();
+  const originalUpdate = api.engine.updateJunoVoices.bind(api.engine);
+  let updates = 0;
+  api.engine.updateJunoVoices = (...args) => { updates += 1; return originalUpdate(...args); };
+  api.bindJunoControls();
+  ["5.5", "8.0", "12.5"].forEach((value) => {
+    input.value = value;
+    listeners.get("input")();
+  });
+  assert.equal(updates, 0, "a drag burst does not update before the shared animation frame");
+  assert.equal(api.callbacks.size, 1, "the burst queues one shared frame");
+  const [[id, callback]] = api.callbacks;
+  api.callbacks.delete(id);
+  callback(16);
+  assert.equal(updates, 1, "the frame applies one selective J-4 update");
+  assert.equal(api.state.juno.resonance, 12.5, "the final pending slider value wins");
+});
+
+test("J-4 ARP control stress preserves envelopes with bounded live automation", async () => {
+  const divisions = { "1/4": 1, "1/8": 0.5, "1/8T": 1 / 3, "1/16": 0.25 };
+  for (const [division, beats] of Object.entries(divisions)) {
+    const { state, engine, ctx } = setup();
+    await engine.init();
+    Object.assign(state.juno, { attack: 0.045, decay: 0.18, sustain: 0.55, release: 0.72, cutoff: 920, envAmount: 2800 });
+    state.bpm = 190;
+    state.juno.arp.division = division;
+    const interval = 60 / state.bpm * beats;
+    const voices = Array.from({ length: 4 }, (_, index) => engine.scheduleJunoArpNote(
+      60 + index, 0.1 + index * interval, interval * 0.5, false, interval,
+    ));
+    const envelopes = voices.map((voice) => ({
+      amp: structuredClone(voice.amp.gain.events),
+      filterA: structuredClone(voice.filterA.frequency.events),
+      filterB: structuredClone(voice.filterB.frequency.events),
+    }));
+    const changes = [
+      ["resonance", (update) => 0.5 + (update % 90) / 10, () => voices[0].filterA.Q],
+      ["pwmAmount", (update) => (update % 101) / 100, () => engine.junoUnit.pwmDepth.gain],
+      ["sub", (update) => (update % 81) / 100, () => voices[0].subGain.gain],
+      ["pulseWidth", (update) => 0.12 + (update % 75) / 100, () => voices[0].pulseBias.offset],
+      ["highPass", (update) => 20 + (update % 80) * 25, () => voices[0].highPass.frequency],
+      ["lfoRate", (update) => 0.08 + (update % 120) / 20, () => engine.junoUnit.lfo.frequency],
+      ["lfoPitch", (update) => (update % 100) / 100, () => engine.junoUnit.pitchDepth.gain],
+      ["lfoFilter", (update) => (update % 100) / 100, () => engine.junoUnit.filterDepth.gain],
+      ["cutoff", (update) => 400 + (update % 120) * 80, null],
+      ["envAmount", (update) => -5000 + (update % 200) * 50, null],
+    ];
+    for (let update = 0; update < 512; update += 1) {
+      ctx.currentTime = 0.05 + update * 0.002;
+      const [name, valueAt, paramForContinuity] = changes[update % changes.length];
+      const param = paramForContinuity?.();
+      const before = param?.valueAt(ctx.currentTime);
+      state.juno[name] = valueAt(update);
+      engine.updateJunoVoices(name);
+      if (param) assert.ok(Math.abs(param.valueAt(ctx.currentTime) - before) < 1e-9,
+        `${division}: ${name} preserves its effective live value while retargeting`);
+    }
+
+    voices.forEach((voice, index) => {
+      assert.deepEqual(voice.amp.gain.events, envelopes[index].amp, `${division}: control bursts do not rewrite amp ADSR`);
+      assert.deepEqual(voice.filterA.frequency.events, envelopes[index].filterA, `${division}: control bursts do not rewrite filter ADSR`);
+      assert.deepEqual(voice.filterB.frequency.events, envelopes[index].filterB, `${division}: control bursts do not rewrite both filter ADSRs`);
+      assert.equal(voice.amp.gain.cancelledAt.length, 1, `${division}: amp is cancelled only by its original ARP programming`);
+      assert.equal(voice.filterA.frequency.cancelledAt.length, 1, `${division}: filter is cancelled only by its original ARP programming`);
+      [voice.sawGain.gain, voice.pulseGain.gain, voice.subGain.gain, voice.pulseBias.offset, voice.highPass.frequency, voice.filterA.Q, voice.filterB.Q]
+        .forEach((param) => assert.ok(param.events.length <= 2, `${division}: live-only parameter automation remains bounded`));
+    });
+    assert.ok(engine.junoUnit.lfo.frequency.events.length <= 2, `${division}: shared J-4 LFO automation remains bounded`);
+    assert.ok(engine.junoUnit.pwmDepth.gain.events.length <= 2, `${division}: shared PWM automation remains bounded`);
+  }
+});
+
 test("DIRECTO reuses safe live controls and mutes channels without changing transport or allocating nodes", async () => {
   const { state, engine, ctx, applyDirectControl, toggleDirectMute } = setup();
   await engine.init();
@@ -923,7 +1038,7 @@ test("BREAK SNARE cancellation takes effect on the next safe quarter-note bounda
     for (const [id, callback] of [...callbacks]) { callbacks.delete(id); callback(); }
   }
   assert.equal(ctx.created, nodes, "arming or cancelling must not allocate structural audio nodes");
-  assert.equal(callbacks.size, 0, "break adds no persistent timers");
+  assert.ok(callbacks.size <= 1, "break adds no timers; an in-flight visual RAF may remain for a queued playhead");
   assert.equal(JSON.stringify(state.drumPattern), patterns);
 });
 
@@ -1000,7 +1115,7 @@ test("J-4 parameter churn allocates nothing and STOP releases every node and sou
   assert.equal(callbacks.size, 0);
 });
 
-test("Mac keyboard mapping plays polyphonic J-4 notes and releases them on tab change", async () => {
+test("Mac keyboard mapping keeps held J-4 notes across internal tab changes", async () => {
   const api = setup();
   const pressed = [];
   const released = [];
@@ -1027,9 +1142,64 @@ test("Mac keyboard mapping plays polyphonic J-4 notes and releases them on tab c
   assert.deepEqual(released[0], [60, "computer-KeyZ"]);
   assert.equal(api.getComputerJunoHeldCount(), 3);
 
-  api.switchTab("mixer");
-  assert.equal(api.getComputerJunoHeldCount(), 0);
-  assert.deepEqual(released.map(([midi]) => midi).sort((a, b) => a - b), [60, 64, 67, 71]);
+  api.switchTab("fx");
+  assert.equal(api.getComputerJunoHeldCount(), 3, "internal navigation must not release held computer keys");
+  assert.deepEqual(released.map(([midi]) => midi), [60]);
+});
+
+test("a live held J-4 voice survives switchTab fx until its matching keyup", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.switchTab("juno");
+  const event = {
+    code: "KeyZ", repeat: false, metaKey: false, ctrlKey: false, altKey: false,
+    target: { tagName: "BODY", isContentEditable: false }, preventDefault() {},
+  };
+  api.handleComputerJunoKeyDown(event);
+  await new Promise((resolve) => setImmediate(resolve));
+  const key = "60:computer-KeyZ";
+  const voice = api.engine.junoHeldVoices.get(key);
+  assert.ok(voice, "the physical key owns a live manual J-4 voice");
+  assert.equal(voice.releasedAt, Infinity);
+
+  api.switchTab("fx");
+  assert.equal(api.engine.junoHeldVoices.get(key), voice, "internal navigation keeps the held voice");
+  assert.equal(voice.releasedAt, Infinity, "internal navigation does not release its envelope");
+
+  api.handleComputerJunoKeyUp(event);
+  assert.equal(api.engine.junoHeldVoices.has(key), false, "the matching keyup remains the release owner");
+});
+
+test("real blur and document invisibility release held J-4 computer keys without changing ARP", async () => {
+  const api = setup();
+  const pressed = [];
+  const released = [];
+  api.engine.pressJunoKey = async (midi, id) => { pressed.push([midi, id]); };
+  api.engine.releaseJunoKey = (midi, id) => { released.push([midi, id]); };
+  api.bindJunoControls();
+  api.switchTab("juno");
+  const event = (code) => ({
+    code, repeat: false, metaKey: false, ctrlKey: false, altKey: false,
+    target: { tagName: "BODY", isContentEditable: false }, preventDefault() {},
+  });
+
+  api.state.juno.arp.enabled = true;
+  api.engine.junoInputNotes.set("60:arp", { midi: 60, order: 1 });
+  api.handleComputerJunoKeyDown(event("KeyZ"));
+  await Promise.resolve();
+  api.dispatchWindowEvent("blur");
+  assert.equal(api.getComputerJunoHeldCount(), 0, "window blur releases physical keyboard ownership");
+  assert.deepEqual(released, [[60, "computer-KeyZ"]]);
+  assert.equal(api.engine.junoInputNotes.size, 1, "blur does not alter ARP note state directly");
+
+  api.handleComputerJunoKeyDown(event("KeyC"));
+  await Promise.resolve();
+  api.document.visibilityState = "hidden";
+  await api.handleVisibilityChange();
+  assert.equal(api.getComputerJunoHeldCount(), 0, "hidden documents release held computer keys");
+  assert.deepEqual(released.at(-1), [64, "computer-KeyC"]);
+  assert.equal(api.engine.junoInputNotes.size, 1, "visibility cleanup preserves ARP ownership/state");
+  assert.equal(pressed.length, 2);
 });
 
 test("ARP-5 builds deterministic UP, DOWN, UP/DOWN, and played-order ranges", () => {
@@ -1294,7 +1464,8 @@ test("rapid continuous controls stay continuous, bound automation, and ignore id
     const before = param.valueAt(ctx.currentTime);
     engine.setSmooth(param, (index % 101) / 100);
     assert.ok(Math.abs(param.valueAt(ctx.currentTime) - before) < 1e-9, "control retargeting must preserve current gain");
-    assert.ok(param.events.length <= 2, "old control automation must not accumulate");
+    assert.ok(param.events.filter((event) => event.time >= ctx.currentTime).length <= 2,
+      "only the current control automation may remain scheduled into the future");
   }
   const calls = param.calls;
   engine.setSmooth(param, (3999 % 101) / 100);
@@ -1381,13 +1552,387 @@ test("a numerical impulse through the delay feedback decays instead of growing o
   assert.ok(finalPeak < initialPeak * 0.001, `delay grew from ${initialPeak} to ${finalPeak}`);
 });
 
-test("completed playhead timers are removed, and hidden tabs do no meter animation", () => {
+test("performance diagnostics stay inert while disabled and use fixed-size buffers when explicitly enabled", async () => {
+  const api = setup();
+  const { diagnostics, engine } = api;
+  assert.equal(diagnostics.enabled, false);
+  assert.equal(diagnostics.buffers, null, "disabled diagnostics must not allocate sample buffers");
+  diagnostics.recordScheduler(0, 80, 2, 110, 3);
+  assert.equal(diagnostics.buffers, null, "disabled scheduler recording must have no side effect");
+
+  await engine.init();
+  diagnostics.enable(engine);
+  assert.equal(diagnostics.buffers.length, 19);
+  assert.equal(diagnostics.buffers[0].length, 256, "each diagnostic ring buffer has a fixed capacity");
+  for (let index = 0; index < 300; index += 1) diagnostics.record("schedulerLateness", index);
+  const snapshot = diagnostics.snapshot(engine);
+  const lateness = new Map(snapshot.scheduler).get("schedulerLateness");
+  assert.equal(lateness.count, 256, "the ring buffer retains a fixed recent window");
+  assert.equal(lateness.max, 299);
+  diagnostics.disable();
+});
+
+test("performance diagnostics record scheduler lateness and skipped steps without changing scheduling", async () => {
+  const api = setup({ clock: { now: 1000 } });
+  await api.engine.init();
+  api.state.playing = true;
+  api.ctx.currentTime = 10.02;
+  api.setSchedulerTimeline(1, 0);
+  api.diagnostics.enable(api.engine);
+  api.scheduler();
+  const snapshot = api.diagnostics.snapshot(api.engine);
+  const scheduler = new Map(snapshot.scheduler);
+  assert.ok(snapshot.totals.schedulerTicks >= 1);
+  assert.ok(snapshot.totals.skippedSteps > 0, "late scheduler recovery must report skipped steps");
+  assert.equal(scheduler.get("schedulerSkippedThisTick").max, snapshot.totals.skippedSteps, "the per-tick series and total use the same skipped-step unit");
+  assert.ok(scheduler.get("schedulerLateness").max > 0);
+  assert.ok(scheduler.get("schedulerEvents").max > 0);
+  assert.ok(scheduler.get("schedulerHorizon").max > 0);
+  api.diagnostics.disable();
+});
+
+test("performance diagnostics degrade silently when PerformanceObserver is unavailable", async () => {
+  const api = setup();
+  await api.engine.init();
+  assert.doesNotThrow(() => api.diagnostics.enable(api.engine));
+  assert.equal(api.diagnostics.observer, null);
+  assert.equal(api.diagnostics.snapshot(api.engine).totals.longTasks, 0);
+  api.diagnostics.disable();
+});
+
+test("diagnostics capture audio-clock progress, output timestamps, and bounded event windows", async () => {
+  const api = setup({ clock: { now: 1000 } });
+  await api.engine.init();
+  api.ctx.currentTime = 10;
+  api.ctx.baseLatency = 0.02;
+  api.ctx.outputLatency = 0.04;
+  api.ctx.getOutputTimestamp = () => ({ contextTime: api.ctx.currentTime - 0.01, performanceTime: api.clock.now - 7 });
+  api.diagnostics.enable(api.engine);
+  api.diagnostics.captureAudioClock(api.engine);
+
+  api.clock.now = 1120;
+  api.ctx.currentTime = 10.02;
+  api.diagnostics.captureAudioClock(api.engine);
+  api.diagnostics.recordScheduledEvent(9.99, 10.08, api.engine);
+  api.diagnostics.recordScheduledEvent(10.06, 10.14, api.engine);
+  api.diagnostics.recordScheduledEvent(10.5, 10.7, api.engine);
+  const snapshot = api.diagnostics.snapshot(api.engine);
+
+  assert.equal(snapshot.scheduling.past, 1);
+  assert.equal(snapshot.scheduling.inHorizon, 1);
+  assert.equal(snapshot.scheduling.tooFar, 1);
+  assert.equal(snapshot.clock.outputTimestamp.currentTime, 10.02);
+  assert.equal(snapshot.clock.outputTimestamp.contextTime, 10.01);
+  assert.equal(snapshot.clock.outputTimestamp.performanceTime, 1113);
+  assert.equal(snapshot.clock.outputTimestamp.baseLatency, 0.02);
+  assert.equal(snapshot.clock.outputTimestamp.outputLatency, 0.04);
+  assert.ok(snapshot.clock.lastJumpMs >= 99, "wall/audio divergence records its last significant jump");
+  const timing = new Map(snapshot.timing);
+  assert.equal(timing.get("scheduledStartDelta").count, 3);
+  assert.equal(timing.get("scheduledStopDelta").count, 3);
+  assert.equal(timing.get("audioProgress").count, 1);
+  api.ctx.state = "interrupted";
+  api.diagnostics.recordAudioState(api.engine, "statechange");
+  assert.equal(api.diagnostics.snapshot(api.engine).lastAudioState.state, "interrupted");
+  assert.equal(api.diagnostics.snapshot(api.engine).lastAudioState.reason, "statechange");
+  api.diagnostics.disable();
+});
+
+test("diagnostic signal snapshot is explicit, finite, and does not allocate a visual loop", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.diagnostics.enable(api.engine);
+  const nodesBefore = api.ctx.created;
+  const first = api.engine.captureDiagnosticSignal();
+  const nodesAfterFirst = api.ctx.created;
+  const second = api.engine.captureDiagnosticSignal();
+
+  assert.equal(nodesAfterFirst - nodesBefore, 8, "one analyser tap per requested bus is created only for explicit capture");
+  assert.equal(api.ctx.created, nodesAfterFirst, "repeated captures reuse the diagnostic taps");
+  for (const signal of Object.values(first)) {
+    assert.equal(signal.finite, true);
+    assert.equal(signal.rms, 0);
+    assert.equal(signal.peak, 0);
+  }
+  assert.deepEqual(second, first);
+  assert.equal(api.callbacks.size, 0, "signal capture schedules no render callback");
+  api.engine.disposeDiagnosticTaps();
+  api.diagnostics.disable();
+});
+
+test("coalesced ranges apply once per frame, retain the last value, and flush on gesture completion", () => {
+  const api = setup();
+  const listeners = new Map();
+  const input = {
+    value: "0",
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const applied = [];
+  api.bindCoalescedRange(input, (value) => applied.push(Number(value)));
+  ["10", "35", "72"].forEach((value) => {
+    input.value = value;
+    listeners.get("input")();
+  });
+  assert.deepEqual(applied, [], "input bursts must wait for the shared frame");
+  assert.equal(api.callbacks.size, 1, "one shared RAF is scheduled for a burst");
+  const [[id, frame]] = api.callbacks;
+  api.callbacks.delete(id);
+  frame(16);
+  assert.deepEqual(applied, [72], "the frame applies only the last input value");
+
+  input.value = "91";
+  listeners.get("input")();
+  listeners.get("pointerup")();
+  assert.deepEqual(applied, [72, 91], "gesture completion flushes the final value immediately");
+});
+
+test("coalesced range ignores click or blur without a real change and flushes a pending final value", () => {
+  const api = setup();
+  const listeners = new Map();
+  const input = {
+    value: "40",
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const applied = [];
+  api.bindCoalescedRange(input, (value) => applied.push(Number(value)));
+
+  listeners.get("pointerup")();
+  listeners.get("blur")();
+  listeners.get("change")();
+  assert.deepEqual(applied, [], "a click without a changed value does not reapply automation");
+
+  input.value = "67";
+  listeners.get("input")();
+  listeners.get("pointerup")();
+  assert.deepEqual(applied, [67], "the final pending value is applied immediately on gesture completion");
+  listeners.get("blur")();
+  assert.deepEqual(applied, [67], "a later blur does not repeat the same update");
+});
+
+test("state rehydration preserves a pending coalesced gesture instead of discarding it", async () => {
+  const listeners = new Map();
+  const input = {
+    min: "120", max: "14000", value: "2800", style: { setProperty() {} },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const control = {
+    dataset: { junoControl: "cutoff" }, style: { setProperty() {} },
+    querySelector(selector) { return selector === "input" ? input : { textContent: "" }; },
+  };
+  const api = setup({ junoControls: [control] });
+  await api.engine.init();
+  let updates = 0;
+  const update = api.engine.updateJunoVoices.bind(api.engine);
+  api.engine.updateJunoVoices = (...args) => { updates += 1; return update(...args); };
+  api.bindJunoControls();
+
+  input.value = "4300";
+  listeners.get("input")();
+  api.renderJunoControls();
+
+  assert.equal(api.state.juno.cutoff, 4300, "the final user gesture wins over a simultaneous visual sync");
+  assert.equal(input.value, "4300", "the range is rehydrated to the effective user value");
+  assert.equal(updates, 1, "the pending gesture is applied once");
+  listeners.get("pointerup")();
+  assert.equal(updates, 1, "completion after rehydration does not reapply the same J-4 value");
+});
+
+test("DIRECTO-to-instrument tabs rehydrate J-4, bass, and ARP controls from state", async () => {
+  const junoListeners = new Map();
+  const arpListeners = new Map();
+  const bassListeners = new Map();
+  const junoInput = { min: "120", max: "14000", value: "200", style: { setProperty() {} }, addEventListener(type, listener) { junoListeners.set(type, listener); } };
+  const arpInput = { min: "10", max: "100", value: "10", style: { setProperty() {} }, addEventListener(type, listener) { arpListeners.set(type, listener); } };
+  const bassInput = { min: "80", max: "12000", value: "80", style: { setProperty() {} }, addEventListener(type, listener) { bassListeners.set(type, listener); } };
+  const junoControl = {
+    dataset: { junoControl: "cutoff" }, style: { setProperty() {} },
+    querySelector(selector) { return selector === "input" ? junoInput : { textContent: "" }; },
+  };
+  const arpGate = {
+    querySelector(selector) { return selector === "input" ? arpInput : { textContent: "" }; },
+  };
+  const bassControl = {
+    dataset: { control: "cutoff" }, style: { setProperty() {} },
+    querySelector(selector) { return selector === "input" ? bassInput : { textContent: "" }; },
+  };
+  const api = setup({ junoControls: [junoControl], junoArpGates: [arpGate], synthControls: [bassControl] });
+  await api.engine.init();
+  api.bindJunoControls();
+  api.bindSynthControls();
+
+  api.applyDirectControl("junoCutoff", 4300);
+  api.applyDirectControl("junoArpGate", 53);
+  api.applyDirectControl("bassCutoff", 1760);
+  api.switchTab("juno");
+  assert.equal(junoInput.value, "4300", "JUNO cutoff reflects the DIRECTO state on entry");
+  assert.equal(arpInput.value, "53", "ARP gate reflects the DIRECTO state on entry");
+  api.switchTab("synth");
+  assert.equal(bassInput.value, "1760", "BAJO cutoff reflects the DIRECTO state on entry");
+
+  junoInput.value = "4800";
+  arpInput.value = "68";
+  bassInput.value = "2100";
+  junoListeners.get("input")();
+  arpListeners.get("input")();
+  bassListeners.get("input")();
+  api.flushCoalescedControls();
+  assert.equal(api.state.juno.cutoff, 4800, "the rehydrated J-4 range remains live");
+  assert.equal(api.state.juno.arp.gate, 0.68, "the rehydrated ARP range remains live");
+  assert.equal(api.state.synth.cutoff, 2100, "the rehydrated bass range remains live");
+});
+
+test("transport ranges are rehydrated from state rather than restored form values", () => {
+  const api = setup();
+  const swing = api.elements.get("swingControl");
+  const master = api.elements.get("masterControl");
+  const masterOutput = api.elements.get("masterOutputControl");
+  api.state.swing = 37;
+  api.state.master = 0.63;
+  swing.value = "99";
+  master.value = "5";
+  masterOutput.value = "5";
+
+  api.bindTransport();
+
+  assert.equal(swing.value, "37");
+  assert.equal(master.value, "63");
+  assert.equal(masterOutput.value, "63");
+  assert.equal(api.state.swing, 37, "form restoration never overwrites swing state");
+  assert.equal(api.state.master, 0.63, "form restoration never overwrites master state");
+});
+
+test("an unchanged J-4 cutoff gesture does not rebase a live filter envelope", async () => {
+  const listeners = new Map();
+  const input = {
+    value: "2800", style: { setProperty() {} },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const control = {
+    dataset: { junoControl: "cutoff" },
+    querySelector(selector) { return selector === "input" ? input : { textContent: "" }; },
+  };
+  const api = setup({ junoControls: [control] });
+  await api.engine.init();
+  api.engine.startJunoVoice(60, api.ctx.currentTime + 0.01, false, "manual");
+  let rebases = 0;
+  const originalRebase = api.engine.rebaseJunoFilterEnvelope.bind(api.engine);
+  api.engine.rebaseJunoFilterEnvelope = (...args) => { rebases += 1; return originalRebase(...args); };
+  api.bindJunoControls();
+
+  listeners.get("pointerup")();
+  listeners.get("blur")();
+  assert.equal(rebases, 0, "an unchanged click/blur does not touch the active cutoff envelope");
+
+  input.value = "3600";
+  listeners.get("input")();
+  listeners.get("pointerup")();
+  assert.equal(rebases, 1, "a real final change flushes exactly once");
+});
+
+test("bass controls render from JavaScript state instead of restored form values", () => {
+  const listeners = new Map();
+  const style = { values: new Map(), setProperty(name, value) { this.values.set(name, value); } };
+  const input = {
+    min: "90", max: "6000", value: "5300", style,
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const output = { textContent: "" };
+  const dial = {
+    dataset: { control: "cutoff" }, style,
+    querySelector(selector) { return selector === "input" ? input : output; },
+  };
+  const api = setup({ synthControls: [dial] });
+  api.state.synth.cutoff = 900;
+
+  api.bindSynthControls();
+
+  assert.equal(api.state.synth.cutoff, 900, "restored form state never overwrites synth state");
+  assert.equal(input.value, "900", "the input is rehydrated from state");
+  assert.equal(output.textContent, "900 Hz");
+  assert.ok(style.values.has("--dial-angle"), "the dial is rendered from the same state value");
+  assert.ok(listeners.has("input"));
+});
+
+test("DIRECTO slider drags do not trigger a full DIRECTO render or allocate audio nodes", async () => {
+  const listeners = new Map();
+  const input = {
+    value: "0",
+    style: { setProperty() {} },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const output = { textContent: "" };
+  const control = {
+    dataset: { directControl: "junoLfoFilter" },
+    querySelector(selector) { return selector === "input" ? input : output; },
+  };
+  const api = setup({ directControls: [control] });
+  await api.engine.init();
+  api.diagnostics.enable(api.engine);
+  const nodesBefore = api.ctx.created;
+  api.bindDirectControls();
+  const rendersBefore = new Map(api.diagnostics.snapshot(api.engine).ui).get("directRender").count;
+  ["20", "55", "80"].forEach((value) => {
+    input.value = value;
+    listeners.get("input")();
+  });
+  const [[id, frame]] = api.callbacks;
+  api.callbacks.delete(id);
+  frame(16);
+  const directRender = new Map(api.diagnostics.snapshot(api.engine).ui).get("directRender");
+  assert.equal(api.state.juno.lfoFilter, 0.8);
+  assert.equal(directRender.count, rendersBefore, "continuous DIRECTO updates must not rerender the whole surface");
+  assert.equal(api.ctx.created, nodesBefore, "a DIRECTO slider does not allocate audio nodes");
+  api.diagnostics.disable();
+});
+
+test("playhead uses one RAF queue instead of per-step timeouts and updates cached elements", () => {
+  const api = setup();
+  api.engine.ctx = api.ctx;
+  api.state.playing = true;
+  const timeoutsBefore = api.getTimeoutCount();
+  api.queuePlayhead(3, 0);
+  api.queuePlayhead(4, 0);
+  assert.equal(api.getTimeoutCount(), timeoutsBefore, "queuing playhead steps creates no setTimeout");
+  assert.equal(api.callbacks.size, 1, "queued steps share one RAF");
+  const [[id, frame]] = api.callbacks;
+  api.callbacks.delete(id);
+  frame(16);
+  assert.equal(api.getPlayheadTimerCount(), 0);
+  assert.equal(api.state.currentStep, 4, "the latest due playhead step wins within the frame");
+  assert.equal(api.queryCounts.get(".position-led") || 0, 0, "playhead rendering does not rescan position LEDs");
+  assert.equal(api.queryCounts.get(".drum-step") || 0, 0, "playhead rendering does not rescan drum steps");
+  assert.equal(api.queryCounts.get(".bass-step") || 0, 0, "playhead rendering does not rescan bass steps");
+});
+
+test("diagnostics measure audio clock drift from a reference plus frame gaps and tab switches", async () => {
+  const api = setup({ clock: { now: 1000 } });
+  await api.engine.init();
+  api.ctx.currentTime = 2;
+  api.diagnostics.enable(api.engine);
+  api.clock.now = 1500;
+  api.diagnostics.recordScheduler(2.5, 0, 0, 110, 1);
+  api.clock.now = 1600;
+  api.diagnostics.recordScheduler(2.55, 0, 0, 110, 1);
+  api.switchTab("synth");
+  api.state.playing = true;
+  api.refreshVisualVisibility();
+  api.scopeLoop(10);
+  api.scopeLoop(95);
+  const ui = new Map(api.diagnostics.snapshot(api.engine).ui);
+  assert.ok(Math.abs(api.diagnostics.snapshot(api.engine).audioClock.max - 50) < 1e-9, "clock delta is drift from the reference, not page age");
+  assert.equal(ui.get("animationFrameGap").max, 85);
+  assert.ok(ui.get("tabSwitch").count >= 1);
+  api.diagnostics.disable();
+});
+
+test("completed playhead timers are removed, and inactive visual tabs do no meter animation", () => {
   const api = setup(); api.engine.ctx = api.ctx;
   for (let index = 0; index < 500; index += 1) {
     api.queuePlayhead(index % 16, api.ctx.currentTime);
     for (const [id, callback] of [...api.callbacks]) { api.callbacks.delete(id); callback(); }
     assert.equal(api.getPlayheadTimerCount(), 0);
   }
+  api.state.playing = true;
   api.switchTab("synth"); assert.equal(api.callbacks.size, 1);
   api.switchTab("synth"); assert.equal(api.callbacks.size, 1, "do not duplicate animation loops");
   api.switchTab("bass"); assert.equal(api.callbacks.size, 0);
@@ -1395,4 +1940,94 @@ test("completed playhead timers are removed, and hidden tabs do no meter animati
   api.document.visibilityState = "hidden";
   for (const [id, callback] of [...api.callbacks]) { api.callbacks.delete(id); callback(1000); }
   assert.equal(api.callbacks.size, 0);
+});
+
+test("scope rendering requires a visible synth tab", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.diagnostics.enable(api.engine);
+  api.state.playing = true;
+  api.switchTab("synth");
+  assert.equal(api.callbacks.size, 1, "the visible synth tab owns one visual RAF");
+  api.switchTab("juno");
+  assert.equal(api.callbacks.size, 0, "leaving synth cancels its visual RAF immediately");
+  api.scopeLoop(100);
+  const ui = new Map(api.diagnostics.snapshot(api.engine).ui);
+  assert.equal(ui.get("scopeRender").count, 0, "an inactive synth tab does not draw scope frames");
+  api.diagnostics.disable();
+});
+
+test("a successful visibility resume restarts only the eligible visual RAF", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.state.playing = true;
+  api.switchTab("synth");
+  assert.equal(api.callbacks.size, 1, "the visible scope starts with one RAF");
+
+  api.document.visibilityState = "hidden";
+  api.ctx.state = "suspended";
+  await api.handleVisibilityChange();
+  assert.equal(api.callbacks.size, 0, "hiding a suspended context stops the scope RAF");
+
+  api.document.visibilityState = "visible";
+  await api.handleVisibilityChange();
+  assert.equal(api.ctx.state, "running");
+  assert.equal(api.getVisualDiagnostics().scopeActive, true, "scope restarts after a successful resume");
+  assert.equal(api.callbacks.size, 1, "resume creates one scope RAF, not duplicates");
+  await api.handleVisibilityChange();
+  assert.equal(api.callbacks.size, 1, "a repeated visible event keeps one RAF");
+
+  api.document.visibilityState = "hidden";
+  api.ctx.state = "suspended";
+  await api.handleVisibilityChange();
+  api.document.visibilityState = "visible";
+  api.switchTab("mixer");
+  await api.handleVisibilityChange();
+  assert.equal(api.getVisualDiagnostics().meterActive, true, "the eligible mixer meter also restarts after resume");
+  assert.equal(api.callbacks.size, 1, "the meter owns exactly one RAF after resume");
+});
+
+test("desktop visuals remain eligible for preview and clip decay after STOP", async () => {
+  const api = setup({ clock: { now: 0 } });
+  await api.engine.init();
+  api.state.playing = false;
+  api.switchTab("synth");
+  assert.equal(api.getVisualMode(), "desktop");
+  assert.equal(api.getVisualDiagnostics().scopeVisible, true, "a running desktop context may render a stopped-transport preview");
+  assert.equal(api.callbacks.size, 1, "desktop preview owns one visual RAF");
+
+  api.switchTab("mixer");
+  api.engine.analyser.getFloatTimeDomainData = (data) => data.fill(1);
+  api.renderReductionMeter();
+  assert.equal(api.elements.get("masterClipLamp").classList.contains("is-clipping"), true, "a preview peak lights the clip lamp");
+  api.clock.now = 1000;
+  api.engine.analyser.getFloatTimeDomainData = (data) => data.fill(0);
+  api.renderReductionMeter();
+  assert.equal(api.elements.get("masterClipLamp").classList.contains("is-clipping"), false, "the clip lamp expires after STOP while visuals remain active");
+});
+
+test("coarse pointer PLAY profile disables scope and caps visible mixer meters at 10 fps", async () => {
+  const api = setup({ coarsePointer: true });
+  await api.engine.init();
+  api.diagnostics.enable(api.engine);
+  api.state.playing = true;
+  api.switchTab("synth");
+  assert.equal(api.getVisualMode(), "mobile-performance");
+  assert.equal(api.callbacks.size, 0, "mobile PLAY never schedules scope rendering");
+  api.switchTab("mixer");
+  assert.equal(api.callbacks.size, 1, "the visible mixer keeps one capped meter loop");
+  for (const timestamp of [0, 40, 80, 100, 140, 200]) {
+    const [[id, callback]] = api.callbacks;
+    api.callbacks.delete(id);
+    callback(timestamp);
+  }
+  const snapshot = api.diagnostics.snapshot(api.engine);
+  const ui = new Map(snapshot.ui);
+  assert.equal(ui.get("scopeRender").count, 0, "mobile profile performs no scope or analyser read for scope");
+  assert.equal(snapshot.totals.meterFrames, 3, "meter frames are limited to 10 fps");
+  assert.ok(snapshot.totals.meterSkippedRate >= 3, "intermediate meter frames are counted as frequency-capped");
+  api.stopTransport();
+  assert.equal(api.getVisualMode(), "desktop", "stopping reverses the mobile performance profile");
+  assert.equal(api.callbacks.size, 1, "after STOP, desktop-style meter decay remains observable on a running context");
+  api.diagnostics.disable();
 });
