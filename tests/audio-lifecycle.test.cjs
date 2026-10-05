@@ -115,7 +115,7 @@ function mockContext(sampleRate = 48000) {
   return ctx;
 }
 
-function setup({ junoControls = [] } = {}) {
+function setup({ junoControls = [], junoToggles = [] } = {}) {
   const callbacks = new Map(); let nextId = 0;
   const elements = new Map();
   const element = () => ({ textContent: "", checked: false, hidden: false, children: [],
@@ -125,7 +125,11 @@ function setup({ junoControls = [] } = {}) {
   });
   const ctx = mockContext();
   const document = { visibilityState: "visible",
-    querySelectorAll(selector) { return selector === "[data-juno-control]" ? junoControls : []; },
+    querySelectorAll(selector) {
+      if (selector === "[data-juno-control]") return junoControls;
+      if (selector === "[data-juno-toggle]") return junoToggles;
+      return [];
+    },
     addEventListener() {},
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); } };
   const window = { AudioContext: function () { return ctx; },
@@ -141,7 +145,7 @@ function setup({ junoControls = [] } = {}) {
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, startTransport, stopTransport, switchTab, scopeLoop,
       queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
-      bindJunoControls, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
+      bindJunoControls, applyJunoControl, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
       buildArpSequence, scheduleArpeggiator,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
@@ -524,6 +528,28 @@ test("editing J-4 Attack preserves a held manual voice and its amp automation", 
   assert.ok(voice.amp.gain.valueAt(ctx.currentTime) > 0, "the held voice amplitude must remain audible");
 });
 
+test("forcing PULSE on while disabling the last J-4 DCO updates active voices", async () => {
+  const listeners = new Map();
+  const sawButton = {
+    dataset: { junoToggle: "saw" },
+    classList: { toggle() {} }, setAttribute() {},
+    addEventListener(type, listener) { listeners.set(type, listener); },
+  };
+  const api = setup({ junoToggles: [sawButton] });
+  await api.engine.init();
+  Object.assign(api.state.juno, { saw: true, pulse: false, sub: 0 });
+  const voice = api.engine.startJunoVoice(60, api.ctx.currentTime + 0.01, false, "manual");
+  const before = voice.pulseGain.gain.events.length;
+
+  api.bindJunoControls();
+  listeners.get("click")();
+
+  assert.equal(api.state.juno.saw, false);
+  assert.equal(api.state.juno.pulse, true, "the DCO safety guard enables PULSE in state");
+  assert.ok(voice.pulseGain.gain.events.length > before, "the forced oscillator updates every existing voice");
+  assert.equal(voice.pulseGain.gain.events.at(-1).value, 0.27, "the active voice receives the audible PULSE target");
+});
+
 test("J-4 keeps filter modulation above the safe floor and removes PWM DC", async () => {
   const { state, engine, ctx } = setup();
   await engine.init();
@@ -715,6 +741,52 @@ test("J-4 non-filter controls preserve active cutoff automation", async () => {
 
   assert.deepEqual(voice.filterA.frequency.events, before);
   assert.deepEqual(voice.filterB.frequency.events, before);
+});
+
+test("J-4 live controls write only their owning AudioParams", async () => {
+  const cases = [
+    ["resonance", 9, 8], ["pwmAmount", 70, 1], ["sub", 50, 4], ["pulseWidth", 68, 4],
+    ["highPass", 600, 4], ["lfoRate", 360, 1], ["lfoPitch", 65, 1], ["lfoFilter", 72, 1],
+    ["cutoff", 4300, 0], ["envAmount", 4100, 0], ["attack", 180, 0], ["decay", 620, 0],
+    ["sustain", 45, 0], ["release", 980, 0], ["fineTune", 17, 0],
+  ];
+  for (const [name, rawValue, expectedParams] of cases) {
+    const { state, engine, ctx, applyJunoControl } = setup();
+    await engine.init();
+    state.bpm = 190;
+    state.juno.arp.division = "1/16";
+    const interval = 60 / state.bpm / 4;
+    const voices = Array.from({ length: 4 }, (_, index) => engine.scheduleJunoArpNote(
+      60 + index, 0.1 + index * interval, interval * 0.5, false, interval,
+    ));
+    const liveParams = [
+      engine.junoUnit.chorusLfo.frequency, engine.junoUnit.chorusDepthLeft.gain, engine.junoUnit.chorusDepthRight.gain,
+      engine.junoUnit.wet.gain, engine.junoUnit.dry.gain, engine.junoUnit.lfo.frequency, engine.junoUnit.pitchDepth.gain,
+      engine.junoUnit.filterDepth.gain, engine.junoUnit.pwmDepth.gain,
+      ...voices.flatMap((voice) => [voice.sawGain.gain, voice.pulseGain.gain, voice.subGain.gain, voice.pulseBias.offset,
+        voice.highPass.frequency, voice.filterA.Q, voice.filterB.Q]),
+    ];
+    const before = liveParams.map((param) => ({ events: param.events.length, cancels: param.cancelledAt.length }));
+    const envelopes = voices.map((voice) => ({ amp: structuredClone(voice.amp.gain.events), filter: structuredClone(voice.filterA.frequency.events) }));
+    ctx.currentTime = 0.05;
+    applyJunoControl(name, rawValue);
+    const changed = liveParams.reduce((count, param, index) => count + Number(param.events.length > before[index].events), 0);
+    const cancels = liveParams.reduce((count, param, index) => count + param.cancelledAt.length - before[index].cancels, 0);
+    const events = liveParams.reduce((count, param, index) => count + param.events.length - before[index].events, 0);
+    assert.equal(changed, expectedParams, `${name}: only its owning params change`);
+    assert.equal(cancels, expectedParams, `${name}: one controlled cancellation per owning param`);
+    assert.equal(events, expectedParams * 2, `${name}: one anchor and target per owning param`);
+    voices.forEach((voice, index) => {
+      assert.deepEqual(voice.amp.gain.events, envelopes[index].amp, `${name}: amp ADSR remains exclusive`);
+      assert.deepEqual(voice.filterA.frequency.events, envelopes[index].filter, `${name}: filter ADSR remains exclusive for ARP`);
+    });
+    const afterFirst = liveParams.map((param) => ({ events: param.events.length, cancels: param.cancelledAt.length }));
+    applyJunoControl(name, rawValue);
+    liveParams.forEach((param, index) => {
+      assert.equal(param.events.length, afterFirst[index].events, `${name}: identical target schedules nothing`);
+      assert.equal(param.cancelledAt.length, afterFirst[index].cancels, `${name}: identical target cancels nothing`);
+    });
+  }
 });
 
 test("DIRECTO reuses safe live controls and mutes channels without changing transport or allocating nodes", async () => {

@@ -754,34 +754,40 @@ class AudioEngine {
     return this.junoUnit;
   }
 
-  updateJunoUnit() {
+  updateJunoUnit(controlName = null) {
     const unit = this.junoUnit;
     if (!unit || !this.ctx) return;
     const settings = getJunoUnitSettings(state.juno);
-    this.setSmooth(unit.chorusLfo.frequency, settings.chorusRate, 0.04);
-    this.setSmooth(unit.chorusDepthLeft.gain, settings.chorusDepth, 0.04);
-    this.setSmooth(unit.chorusDepthRight.gain, -settings.chorusDepth, 0.04);
-    this.setSmooth(unit.wet.gain, settings.wet, 0.035);
-    this.setSmooth(unit.dry.gain, settings.dry, 0.035);
-    this.setSmooth(unit.lfo.frequency, settings.lfoRate, 0.035);
-    this.setSmooth(unit.pitchDepth.gain, settings.pitchDepth, 0.035);
-    this.setSmooth(unit.filterDepth.gain, settings.filterDepth, 0.035);
-    this.setSmooth(unit.pwmDepth.gain, settings.pwmDepth, 0.035);
+    if (!controlName || controlName === "chorusMode") {
+      this.setSmooth(unit.chorusLfo.frequency, settings.chorusRate, 0.04);
+      this.setSmooth(unit.chorusDepthLeft.gain, settings.chorusDepth, 0.04);
+      this.setSmooth(unit.chorusDepthRight.gain, -settings.chorusDepth, 0.04);
+      this.setSmooth(unit.wet.gain, settings.wet, 0.035);
+      this.setSmooth(unit.dry.gain, settings.dry, 0.035);
+    }
+    if (!controlName || controlName === "lfoRate") this.setSmooth(unit.lfo.frequency, settings.lfoRate, 0.035);
+    if (!controlName || controlName === "lfoPitch") this.setSmooth(unit.pitchDepth.gain, settings.pitchDepth, 0.035);
+    if (!controlName || controlName === "lfoFilter") this.setSmooth(unit.filterDepth.gain, settings.filterDepth, 0.035);
+    if (!controlName || controlName === "pwmAmount") this.setSmooth(unit.pwmDepth.gain, settings.pwmDepth, 0.035);
   }
 
   updateJunoVoices(controlName = null) {
     if (!this.ctx) return;
-    this.updateJunoUnit();
     const synth = state.juno;
     const maxFrequency = this.ctx.sampleRate * 0.45;
+    if (!controlName || ["chorusMode", "lfoRate", "lfoPitch", "lfoFilter", "pwmAmount"].includes(controlName)) {
+      this.updateJunoUnit(controlName);
+    }
     this.junoVoices.forEach((voice) => {
-      this.setSmooth(voice.sawGain.gain, synth.saw ? 0.34 : 0, 0.025);
-      this.setSmooth(voice.pulseGain.gain, synth.pulse ? 0.27 : 0, 0.025);
-      this.setSmooth(voice.subGain.gain, synth.sub * 0.24, 0.025);
-      this.setSmooth(voice.pulseBias.offset, (synth.pulseWidth - 0.5) * 1.55, 0.025);
-      this.setSmooth(voice.highPass.frequency, clamp(synth.highPass, 20, maxFrequency));
-      this.setSmooth(voice.filterA.Q, synth.resonance * 0.72);
-      this.setSmooth(voice.filterB.Q, synth.resonance * 0.34);
+      if (!controlName || controlName === "saw") this.setSmooth(voice.sawGain.gain, synth.saw ? 0.34 : 0, 0.025);
+      if (!controlName || controlName === "pulse") this.setSmooth(voice.pulseGain.gain, synth.pulse ? 0.27 : 0, 0.025);
+      if (!controlName || controlName === "sub") this.setSmooth(voice.subGain.gain, synth.sub * 0.24, 0.025);
+      if (!controlName || controlName === "pulseWidth") this.setSmooth(voice.pulseBias.offset, (synth.pulseWidth - 0.5) * 1.55, 0.025);
+      if (!controlName || controlName === "highPass") this.setSmooth(voice.highPass.frequency, clamp(synth.highPass, 20, maxFrequency));
+      if (!controlName || controlName === "resonance") {
+        this.setSmooth(voice.filterA.Q, synth.resonance * 0.72);
+        this.setSmooth(voice.filterB.Q, synth.resonance * 0.34);
+      }
       if (["cutoff", "envAmount"].includes(controlName) && voice.releasedAt === Infinity) {
         this.rebaseJunoFilterEnvelope(voice, maxFrequency);
       }
@@ -2642,8 +2648,11 @@ function applyJunoControl(name, rawValue) {
   state.juno[name] = junoStateValue(name, rawValue);
   // Attack defines future envelopes only; FILTER LFO owns only the shared
   // modulation depth, so neither route touches a voice cutoff envelope.
-  if (name === "lfoFilter") engine.updateJunoUnit();
-  else if (name !== "attack") engine.updateJunoVoices(name);
+  if (name === "lfoFilter") engine.updateJunoUnit("lfoFilter");
+  else if (name === "sub" || name === "pulseWidth" || name === "pwmAmount" || name === "highPass"
+    || name === "cutoff" || name === "resonance" || name === "envAmount" || name === "lfoRate" || name === "lfoPitch") {
+    engine.updateJunoVoices(name);
+  }
 }
 
 function applyJunoArpGate(rawValue) {
@@ -2727,8 +2736,12 @@ function bindJunoControls() {
       const name = button.dataset.junoToggle;
       state.juno[name] = !state.juno[name];
       // Never allow a completely silent DCO by accident.
-      if (!state.juno.saw && !state.juno.pulse && state.juno.sub <= 0) state.juno.pulse = true;
-      engine.updateJunoVoices();
+      const forcedPulse = !state.juno.saw && !state.juno.pulse && state.juno.sub <= 0;
+      if (forcedPulse) state.juno.pulse = true;
+      engine.updateJunoVoices(name);
+      // The safeguard can change PULSE while the user clicked SAW. Update its
+      // live gain too, so state, UI, and held/ARP voices cannot diverge.
+      if (forcedPulse && name !== "pulse") engine.updateJunoVoices("pulse");
       renderJunoControls();
     });
   });
@@ -2742,7 +2755,7 @@ function bindJunoControls() {
   document.querySelectorAll("[data-juno-chorus]").forEach((button) => {
     button.addEventListener("click", () => {
       state.juno.chorusMode = button.dataset.junoChorus;
-      engine.updateJunoUnit();
+      engine.updateJunoUnit("chorusMode");
       renderJunoControls();
     });
   });
