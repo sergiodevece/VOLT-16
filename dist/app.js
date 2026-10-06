@@ -111,6 +111,7 @@ const REVERB_PRESETS = {
 };
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+const BASS_FOLLOW_FALLBACK_ROOT_MIDI = 24;
 const BLACK_NOTES = new Set([1, 3, 6, 8, 10]);
 const WHITE_KEY_INDEX = new Map([[0, 0], [2, 1], [4, 2], [5, 3], [7, 4], [9, 5], [11, 6]]);
 const BLACK_KEY_AFTER = new Map([[1, 0], [3, 1], [6, 3], [8, 4], [10, 5]]);
@@ -177,6 +178,11 @@ const state = {
   bassPattern: cloneBassPattern(),
   mutes: Object.fromEntries(CHANNELS.map(({ id }) => [id, false])),
   directMutes: { drums: false, bass: false, juno: false },
+  bassFollow: {
+    enabled: false,
+    pendingRootMidi: null,
+    effectiveRootMidi: null,
+  },
   snareBreak: {
     mode: "ONLY",
     bars: 4,
@@ -1649,9 +1655,11 @@ class AudioEngine {
       if (state.juno.arp.hold && this.junoArpAwaitingChord) this.junoLatchedNotes.clear();
       this.junoArpAwaitingChord = false;
       this.junoLatchedNotes.set(key, note);
+      queueBassFollowRootFromJuno();
       renderJunoArp();
       return;
     }
+    queueBassFollowRootFromJuno();
     const voice = this.startJunoVoice(midi, this.ctx.currentTime + 0.008);
     if (voice) this.junoHeldVoices.set(key, voice);
   }
@@ -3118,6 +3126,77 @@ function getJunoArpNotes() {
   return buildArpSequence([...source.values()], state.juno.arp.mode, state.juno.arp.octaves);
 }
 
+function getBassFollowSourceNotes() {
+  // These maps are the J-4's keyboard/hold ownership. Never use the ARP's
+  // individual output notes: they are playback, not the musician's chord.
+  const source = state.juno.arp.enabled && state.juno.arp.hold
+    ? engine.junoLatchedNotes : engine.junoInputNotes;
+  return [...source.values()];
+}
+
+function getBassFollowBaseRootMidi() {
+  return state.bassPattern.find((step) => step.active)?.midi ?? BASS_FOLLOW_FALLBACK_ROOT_MIDI;
+}
+
+function getLowestBassFollowRootMidi() {
+  const notes = getBassFollowSourceNotes().map((note) => note.midi).filter(Number.isFinite);
+  return notes.length ? Math.min(...notes) : null;
+}
+
+function queueBassFollowRootFromJuno() {
+  if (!state.bassFollow.enabled) return false;
+  const rootMidi = getLowestBassFollowRootMidi();
+  if (rootMidi === null) return false;
+  state.bassFollow.pendingRootMidi = rootMidi;
+  renderDirectControls();
+  return true;
+}
+
+function applyPendingBassFollowRoot() {
+  const follow = state.bassFollow;
+  if (!follow.enabled) {
+    follow.pendingRootMidi = null;
+    return false;
+  }
+  if (!Number.isFinite(follow.pendingRootMidi)) return false;
+  follow.effectiveRootMidi = follow.pendingRootMidi;
+  follow.pendingRootMidi = null;
+  renderDirectControls();
+  return true;
+}
+
+function getBassFollowMidi(midi, rootMidi = state.bassFollow.effectiveRootMidi) {
+  if (!state.bassFollow.enabled || !Number.isFinite(rootMidi)) return midi;
+  const baseRootMidi = getBassFollowBaseRootMidi();
+  const ascending = ((rootMidi - baseRootMidi) % 12 + 12) % 12;
+  // Keep the bass close to its source register. A tritone intentionally goes
+  // down six semitones, rather than up six, for a stable deterministic tie.
+  const semitones = ascending >= 6 ? ascending - 12 : ascending;
+  return midi + semitones;
+}
+
+function formatBassFollowRoot(midi) {
+  return NOTE_NAMES[((midi % 12) + 12) % 12].replace("♯", "#");
+}
+
+function toggleBassFollow() {
+  const follow = state.bassFollow;
+  follow.enabled = !follow.enabled;
+  if (follow.enabled) {
+    // A fresh arm never advertises or reuses the previous retained chord.
+    follow.pendingRootMidi = null;
+    follow.effectiveRootMidi = null;
+    queueBassFollowRootFromJuno();
+  } else {
+    // Newly scheduled bass notes now use their pattern MIDI. Previously
+    // scheduled/live voices stay untouched, and no stale root can leak into a
+    // later re-arm or mislead the UI while FOLLOW is off.
+    follow.pendingRootMidi = null;
+    follow.effectiveRootMidi = null;
+  }
+  renderDirectControls();
+}
+
 function renderJunoArp() {
   const arp = state.juno.arp;
   document.querySelectorAll("[data-juno-arp-toggle]").forEach((button) => {
@@ -3490,13 +3569,15 @@ function scheduleStep(step, time) {
   }
 
   const bassStep = state.bassPattern[step];
+  applyPendingBassFollowRoot();
   if (bassStep.active) {
     const baseDuration = 60 / state.bpm / 4;
     const nextPatternStep = state.bassPattern[(step + 1) % 16];
     const extendsIntoSlide = nextPatternStep.active && nextPatternStep.slide;
     const duration = baseDuration * (extendsIntoSlide ? 1.16 : 0.88);
-    engine.scheduleBass(bassStep, time, duration, previousStepHadBass ? previousBassMidi : null);
-    previousBassMidi = bassStep.midi;
+    const followedMidi = getBassFollowMidi(bassStep.midi);
+    engine.scheduleBass({ ...bassStep, midi: followedMidi }, time, duration, previousStepHadBass ? previousBassMidi : null);
+    previousBassMidi = followedMidi;
     previousStepHadBass = true;
   } else {
     previousStepHadBass = false;
@@ -3638,7 +3719,12 @@ async function startTransport() {
     engine.updateAllEffectSends();
     state.playing = true;
     stepToSchedule = 0;
-    previousBassMidi = state.bassPattern[15].active ? state.bassPattern[15].midi : null;
+    const pendingFollowRoot = state.bassFollow.enabled && Number.isFinite(state.bassFollow.pendingRootMidi)
+      ? state.bassFollow.pendingRootMidi
+      : state.bassFollow.effectiveRootMidi;
+    previousBassMidi = state.bassPattern[15].active
+      ? getBassFollowMidi(state.bassPattern[15].midi, pendingFollowRoot)
+      : null;
     previousStepHadBass = state.bassPattern[15].active;
     nextStepTime = engine.ctx.currentTime + 0.055;
     transportStartTime = nextStepTime;
@@ -4528,6 +4614,16 @@ function renderDirectControls() {
         : status === "cancelRequested" ? "CANCELACIÓN PENDIENTE"
           : "ARMAR";
   }
+  const bassFollowButton = document.getElementById("bassFollowButton");
+  if (bassFollowButton) {
+    const follow = state.bassFollow;
+    const rootMidi = Number.isFinite(follow.pendingRootMidi) ? follow.pendingRootMidi : follow.effectiveRootMidi;
+    bassFollowButton.classList.toggle("is-active", follow.enabled);
+    bassFollowButton.setAttribute("aria-pressed", String(follow.enabled));
+    bassFollowButton.querySelector("small").textContent = !follow.enabled ? "OFF"
+      : Number.isFinite(rootMidi) ? `FOLLOW: ${formatBassFollowRoot(rootMidi)}`
+        : "ON · TOCA ACORDE J-4";
+  }
   diagnostics.end("directRender", diagnosticStartedAt);
 }
 
@@ -4595,6 +4691,7 @@ function bindDirectControls() {
     });
   });
   document.getElementById("snareBreakButton")?.addEventListener("click", requestSnareBreak);
+  document.getElementById("bassFollowButton")?.addEventListener("click", toggleBassFollow);
   renderDirectControls();
 }
 

@@ -170,7 +170,8 @@ function setup({ junoControls = [], junoToggles = [], junoArpGates = [], synthCo
       bindJunoControls, bindSynthControls, bindDirectControls, bindTransport, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
       bindCoalescedRange, flushCoalescedControls, flushCoalescedControl, renderPlayhead, renderDirectControls, applyJunoControl,
       renderJunoControls, renderSynthControls, handleVisibilityChange, refreshVisualVisibility, updateMeterAnimation, getVisualMode, getVisualDiagnostics, renderReductionMeter,
-      buildArpSequence, scheduleArpeggiator,
+      buildArpSequence, scheduleArpeggiator, getBassFollowSourceNotes, getLowestBassFollowRootMidi,
+      queueBassFollowRootFromJuno, applyPendingBassFollowRoot, getBassFollowMidi, toggleBassFollow,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       setSchedulerTimeline: (time, step) => { nextStepTime = time; stepToSchedule = step; },
       getComputerJunoHeldCount: () => computerJunoHeld.size,
@@ -948,6 +949,181 @@ test("DIRECTO reuses safe live controls and mutes channels without changing tran
   ["kick", "snare", "clap", "closedHat", "openHat", "bass", "juno"].forEach((id) => {
     assert.equal(engine.channels[id].gain.gain.events.at(-1).value, state.levels[id], `${id} must recover its stored level`);
   });
+});
+
+test("BASS FOLLOW arms without a chord and retains the lowest J-4 chord root", () => {
+  const api = setup();
+  const patternBefore = JSON.stringify(api.state.bassPattern);
+
+  api.toggleBassFollow();
+  assert.equal(api.state.bassFollow.enabled, true);
+  assert.equal(api.state.bassFollow.pendingRootMidi, null, "FOLLOW waits when no J-4 chord exists");
+  assert.equal(api.state.bassFollow.effectiveRootMidi, null, "arming alone leaves the bass at its untransposed base");
+
+  api.engine.junoInputNotes.set("67:one", { midi: 67, order: 1 });
+  api.engine.junoInputNotes.set("60:two", { midi: 60, order: 2 });
+  api.engine.junoInputNotes.set("64:three", { midi: 64, order: 3 });
+  assert.equal(api.getLowestBassFollowRootMidi(), 60, "the lowest held J-4 note is the chord root");
+  assert.equal(api.queueBassFollowRootFromJuno(), true);
+  assert.equal(api.state.bassFollow.pendingRootMidi, 60);
+  api.applyPendingBassFollowRoot();
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 60);
+
+  api.engine.junoInputNotes.clear();
+  assert.equal(api.queueBassFollowRootFromJuno(), false, "releasing a chord keeps the retained root");
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 60);
+
+  api.engine.junoInputNotes.set("65:new", { midi: 65, order: 4 });
+  api.engine.junoInputNotes.set("69:new", { midi: 69, order: 5 });
+  api.queueBassFollowRootFromJuno();
+  api.applyPendingBassFollowRoot();
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 65, "a new chord replaces the retained root");
+  assert.equal(JSON.stringify(api.state.bassPattern), patternBefore, "FOLLOW never mutates the saved bass pattern");
+});
+
+test("BASS FOLLOW uses ARP chord ownership and transposes only future scheduled bass steps", async () => {
+  const api = setup();
+  await api.engine.init();
+  const patternBefore = JSON.stringify(api.state.bassPattern);
+  const invariants = {
+    bpm: api.state.bpm,
+    drums: JSON.stringify(api.state.drumPattern),
+    mutes: JSON.stringify(api.state.mutes),
+    directMutes: JSON.stringify(api.state.directMutes),
+    juno: JSON.stringify(api.state.juno),
+  };
+  const scheduled = [];
+  api.engine.scheduleBass = (step, time, duration, previousMidi) => {
+    scheduled.push({ step: { ...step }, time, duration, previousMidi });
+    return { stopAt: time + duration, fadeAt: Infinity };
+  };
+
+  api.state.bassFollow.enabled = true;
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.hold = true;
+  invariants.juno = JSON.stringify(api.state.juno);
+  api.engine.junoInputNotes.set("60:input", { midi: 60, order: 1 });
+  api.engine.junoLatchedNotes.set("66:held", { midi: 66, order: 1 });
+  api.engine.junoLatchedNotes.set("70:held", { midi: 70, order: 2 });
+  assert.deepEqual(Array.from(api.getBassFollowSourceNotes(), (note) => note.midi), [66, 70], "ARP FOLLOW reads held chord ownership, not input or arp playback");
+  api.queueBassFollowRootFromJuno();
+  assert.equal(api.state.bassFollow.pendingRootMidi, 66);
+
+  const previousEffective = api.state.bassFollow.effectiveRootMidi;
+  assert.equal(previousEffective, null);
+  assert.equal(scheduled.length, 0, "queuing a root does not retune already scheduled bass voices");
+  api.scheduleStep(0, 4);
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 66, "the root becomes effective inside a future scheduler step");
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].step.midi, api.state.bassPattern[0].midi - 6, "a tritone follows the documented descending tie-break");
+  assert.equal(JSON.stringify(api.state.bassPattern), patternBefore);
+
+  api.toggleBassFollow();
+  assert.equal(api.state.bassFollow.enabled, false);
+  assert.equal(api.state.bassFollow.effectiveRootMidi, null, "disabling clears the retained root immediately without touching live audio");
+  api.scheduleStep(3, 4.1);
+  assert.equal(scheduled.at(-1).step.midi, api.state.bassPattern[3].midi, "returning OFF restores untransposed bass notes");
+
+  assert.equal(api.state.bpm, invariants.bpm);
+  assert.equal(JSON.stringify(api.state.drumPattern), invariants.drums);
+  assert.equal(JSON.stringify(api.state.mutes), invariants.mutes);
+  assert.equal(JSON.stringify(api.state.directMutes), invariants.directMutes);
+  assert.equal(JSON.stringify(api.state.juno), invariants.juno);
+});
+
+test("BASS FOLLOW OFF clears stale roots and a fresh arm waits for a new chord", () => {
+  const api = setup();
+  const scheduled = [];
+  api.engine.scheduleBass = (step) => scheduled.push({ ...step });
+  const firstActive = api.state.bassPattern.findIndex((step) => step.active);
+  api.state.bassFollow.enabled = true;
+  api.state.bassFollow.effectiveRootMidi = 29;
+
+  api.toggleBassFollow();
+  assert.equal(api.state.bassFollow.enabled, false);
+  assert.equal(api.state.bassFollow.pendingRootMidi, null);
+  assert.equal(api.state.bassFollow.effectiveRootMidi, null);
+  api.state.bassPattern[firstActive].midi = 31;
+  api.scheduleStep(firstActive, 2);
+  assert.equal(scheduled.at(-1).midi, 31, "OFF follows an edited pattern note without a residual transpose");
+
+  api.toggleBassFollow();
+  assert.equal(api.state.bassFollow.enabled, true);
+  assert.equal(api.state.bassFollow.pendingRootMidi, null);
+  assert.equal(api.state.bassFollow.effectiveRootMidi, null, "OFF -> ON without notes is visibly armed but rootless");
+
+  api.engine.junoInputNotes.set("65:chord", { midi: 65, order: 1 });
+  assert.equal(api.queueBassFollowRootFromJuno(), true);
+  assert.equal(api.state.bassFollow.pendingRootMidi, 65, "OFF -> ON with a chord queues its fresh root");
+});
+
+test("BASS FOLLOW uses the nearest pitch-class interval and preserves pattern intervals", () => {
+  const api = setup();
+  const baseStep = api.state.bassPattern.find((step) => step.active);
+  baseStep.midi = 28; // E
+  api.state.bassFollow.enabled = true;
+
+  api.state.bassFollow.effectiveRootMidi = 26; // D: -2, not +10
+  assert.equal(api.getBassFollowMidi(28), 26);
+  assert.equal(api.getBassFollowMidi(35), 33, "all pattern notes keep the same intervalal relationship");
+
+  api.state.bassFollow.effectiveRootMidi = 33; // F: +5
+  assert.equal(api.getBassFollowMidi(28), 33, "nearest upper root moves upward when closer");
+
+  api.state.bassFollow.effectiveRootMidi = 34; // F#: tritone
+  assert.equal(api.getBassFollowMidi(28), 22, "tritone ties choose the descending -6 direction");
+});
+
+test("BASS FOLLOW retains chord ownership across releases and ignores ARP playback, blur, hidden, and tabs", async () => {
+  const api = setup();
+  api.state.bassFollow.enabled = true;
+  api.engine.junoInputNotes.set("60:low", { midi: 60, order: 1 });
+  api.engine.junoInputNotes.set("67:high", { midi: 67, order: 2 });
+  api.queueBassFollowRootFromJuno();
+  api.applyPendingBassFollowRoot();
+  api.engine.junoInputNotes.delete("60:low");
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 60, "releasing the lowest key keeps the retained root");
+
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.hold = false;
+  api.engine.junoInputNotes.set("62:source", { midi: 62, order: 3 });
+  api.engine.junoLatchedNotes.set("75:arp-output", { midi: 75, order: 4 });
+  assert.deepEqual(Array.from(api.getBassFollowSourceNotes(), (note) => note.midi), [67, 62], "normal ARP still reads held keyboard ownership, never its steps");
+  api.queueBassFollowRootFromJuno();
+  api.applyPendingBassFollowRoot();
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 62);
+
+  api.switchTab("fx");
+  api.dispatchWindowEvent("blur");
+  api.document.visibilityState = "hidden";
+  await api.handleVisibilityChange();
+  assert.equal(api.state.bassFollow.effectiveRootMidi, 62, "focus and visibility cleanup never erase the retained FOLLOW root");
+});
+
+test("BASS FOLLOW transport initialization uses the effective root and repeated toggles stay inert", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.state.bassFollow.enabled = true;
+  api.state.bassFollow.effectiveRootMidi = 26;
+  api.state.bassPattern[15] = { ...api.state.bassPattern[15], active: true, midi: 36 };
+  const scheduled = [];
+  api.engine.scheduleBass = (step, time, duration, previousMidi) => scheduled.push({ step: { ...step }, previousMidi });
+  await api.startTransport();
+  assert.equal(scheduled[0].previousMidi, 38, "initial slide source is already transposed when FOLLOW is effective");
+  api.stopTransport();
+
+  api.toggleBassFollow();
+  const beforeNodes = api.ctx.created;
+  const beforeScheduled = scheduled.length;
+  for (let index = 0; index < 100; index += 1) {
+    api.toggleBassFollow();
+    api.toggleBassFollow();
+  }
+  assert.equal(api.state.bassFollow.enabled, false);
+  assert.equal(api.state.bassFollow.pendingRootMidi, null);
+  assert.equal(api.state.bassFollow.effectiveRootMidi, null);
+  assert.equal(api.ctx.created, beforeNodes, "FOLLOW toggles do not allocate nodes or schedule audio automation");
+  assert.equal(scheduled.length, beforeScheduled, "FOLLOW toggles do not add bass events until a future scheduler step");
 });
 
 test("BREAK SNARE starts on the next safe quarter-note boundary and ONLY replaces future pattern drums", async () => {

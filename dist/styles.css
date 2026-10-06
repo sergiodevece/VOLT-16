@@ -551,6 +551,36 @@ main {
   background: linear-gradient(90deg, var(--juno-purple) 0 var(--range-fill), #090705 var(--range-fill) 100%);
 }
 
+.bass-follow-button {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  min-height: 78px;
+  margin-top: 18px;
+  border: 2px solid #395747;
+  border-bottom-width: 5px;
+  border-radius: 7px;
+  color: #d8ffef;
+  background: linear-gradient(#213d33, #12241e);
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+
+.bass-follow-button small {
+  color: #9bb5aa;
+  font-size: 0.68rem;
+}
+
+.bass-follow-button.is-active {
+  border-color: var(--teal-bright);
+  background: linear-gradient(#27715f, #164238);
+}
+
+.bass-follow-button.is-active small {
+  color: #fff0cd;
+}
+
 .direct-mutes {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
