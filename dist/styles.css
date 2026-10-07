@@ -541,6 +541,9 @@ main {
 .direct-control input {
   width: 100%;
   min-height: 38px;
+  /* DIRECTO is a multitouch performance surface: keep each range gesture in
+     the page instead of letting horizontal browser panning cancel it. */
+  touch-action: none;
 }
 
 .direct-control input[type="range"]::-webkit-slider-runnable-track {
@@ -549,6 +552,61 @@ main {
 
 .direct-control-juno input[type="range"]::-webkit-slider-runnable-track {
   background: linear-gradient(90deg, var(--juno-purple) 0 var(--range-fill), #090705 var(--range-fill) 100%);
+}
+
+.direct-juno-performance {
+  margin-top: 18px;
+  padding: 12px;
+  border: 2px solid #403759;
+  border-radius: 7px;
+  color: #e9ddff;
+  background: linear-gradient(145deg, #28223a, #17141f);
+}
+
+.direct-juno-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.direct-juno-heading h2 {
+  margin: 2px 0 0;
+  color: #e9ddff;
+  font-size: 0.82rem;
+  letter-spacing: 0.13em;
+}
+
+.direct-juno-heading > span {
+  color: #b7a7e8;
+  font-size: 0.61rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.direct-juno-keyboard {
+  padding: 6px;
+  overflow: hidden;
+  border: 2px solid #0b0908;
+  background: #100e0c;
+  touch-action: none;
+}
+
+.direct-juno-piano-bed {
+  width: 100%;
+  height: 112px;
+}
+
+.direct-juno-keyboard .juno-key {
+  height: 108px;
+  padding: 32px 2px 7px;
+  font-size: 0.62rem;
+}
+
+.direct-juno-keyboard .juno-key.is-black {
+  height: 68px;
+  padding: 19px 1px 5px;
 }
 
 .bass-follow-button {

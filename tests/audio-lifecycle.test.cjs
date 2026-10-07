@@ -122,13 +122,21 @@ function setup({ junoControls = [], junoToggles = [], junoArpGates = [], synthCo
   const elements = new Map();
   const element = () => {
     const classes = new Set();
+    const listeners = new Map();
     return { textContent: "", checked: false, hidden: false, children: [], width: 720, height: 230, clientWidth: 720, clientHeight: 230,
       style: { setProperty() {} }, classList: {
         add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
         toggle(name, force) { const active = force === undefined ? !classes.has(name) : Boolean(force); if (active) classes.add(name); else classes.delete(name); return active; },
         contains(name) { return classes.has(name); },
       },
-    setAttribute() {}, addEventListener() {}, querySelector() { return element(); },
+    setAttribute() {},
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(listener);
+    },
+    dispatch(type, event) { (listeners.get(type) || []).forEach((listener) => listener(event)); },
+    listenerCount(type) { return (listeners.get(type) || []).length; },
+    querySelector() { return element(); },
     getContext() { return new Proxy({}, { get: () => () => {} }); },
     };
   };
@@ -166,11 +174,11 @@ function setup({ junoControls = [], junoToggles = [], junoArpGates = [], synthCo
   const context = vm.createContext({ document, window, navigator: {}, console, performance: { now: () => clock.now } });
   vm.runInContext(source.replace(/\ninitialize\(\);\s*$/, "") + `
     globalThis.api = { state, engine, diagnostics, scheduler, startTransport, stopTransport, switchTab, scopeLoop,
-      queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys,
+      queuePlayhead, handleComputerJunoKeyDown, handleComputerJunoKeyUp, releaseAllComputerJunoKeys, releaseAllJunoInputKeys,
       bindJunoControls, bindSynthControls, bindDirectControls, bindTransport, applyDirectControl, toggleDirectMute, requestSnareBreak, scheduleStep,
       bindCoalescedRange, flushCoalescedControls, flushCoalescedControl, renderPlayhead, renderDirectControls, applyJunoControl,
       renderJunoControls, renderSynthControls, handleVisibilityChange, refreshVisualVisibility, updateMeterAnimation, getVisualMode, getVisualDiagnostics, renderReductionMeter,
-      buildArpSequence, scheduleArpeggiator, getBassFollowSourceNotes, getLowestBassFollowRootMidi,
+      buildArpSequence, scheduleArpeggiator, getJunoArpNotes, getBassFollowSourceNotes, getLowestBassFollowRootMidi,
       queueBassFollowRootFromJuno, applyPendingBassFollowRoot, getBassFollowMidi, toggleBassFollow,
       setArpClock: (origin, next) => { transportStartTime = origin; nextArpTime = next; arpStepIndex = 0; },
       setSchedulerTimeline: (time, step) => { nextStepTime = time; stepToSchedule = step; },
@@ -1311,16 +1319,161 @@ test("Mac keyboard mapping keeps held J-4 notes across internal tab changes", as
   assert.equal(api.getComputerJunoHeldCount(), 4);
 
   api.handleComputerJunoKeyDown(event("KeyZ", { repeat: true }));
-  api.handleComputerJunoKeyDown(event("KeyQ", { target: { tagName: "INPUT" } }));
+  api.handleComputerJunoKeyDown(event("KeyQ", { target: { tagName: "INPUT", type: "text" } }));
   assert.equal(pressed.length, 4, "key repeat and editable controls must not create notes");
 
+  api.switchTab("directo");
+  const focusedRange = event("KeyQ", { target: { tagName: "INPUT", type: "range" } });
+  api.handleComputerJunoKeyDown(focusedRange);
+  await Promise.resolve();
+  assert.deepEqual(pressed.at(-1), [72, "computer-KeyQ"], "a focused DIRECTO range keeps the J-4 QWERTY mapping active");
+  assert.equal(focusedRange.prevented, true, "the mapped range key is owned by the J-4, not browser range navigation");
+  api.handleComputerJunoKeyUp(event("KeyQ", { target: { tagName: "INPUT", type: "range" } }));
+
   api.handleComputerJunoKeyUp(event("KeyZ"));
-  assert.deepEqual(released[0], [60, "computer-KeyZ"]);
+  assert.deepEqual(released, [[72, "computer-KeyQ"], [60, "computer-KeyZ"]]);
   assert.equal(api.getComputerJunoHeldCount(), 3);
 
   api.switchTab("fx");
   assert.equal(api.getComputerJunoHeldCount(), 3, "internal navigation must not release held computer keys");
-  assert.deepEqual(released.map(([midi]) => midi), [60]);
+  assert.deepEqual(released.map(([midi]) => midi), [72, 60]);
+});
+
+test("DIRECTO reuses J-4 input ownership for touch, QWERTY, ARP, and BASS FOLLOW without duplicate listeners", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.bindJunoControls();
+  const directKeyboard = api.elements.get("directJunoKeyboard");
+  const directKey = (midi) => ({
+    dataset: { junoMidi: String(midi) },
+    setPointerCapture() {},
+    closest(selector) { return selector === ".juno-key" ? this : null; },
+  });
+  const event = (code) => ({
+    code, repeat: false, metaKey: false, ctrlKey: false, altKey: false,
+    target: { tagName: "BODY", isContentEditable: false }, preventDefault() {},
+  });
+  const pointer = (target, pointerId) => ({ target, pointerId, preventDefault() {} });
+
+  assert.equal(directKeyboard.listenerCount("pointerdown"), 1);
+  assert.equal(directKeyboard.listenerCount("pointerup"), 1);
+  api.switchTab("directo");
+  api.handleComputerJunoKeyDown(event("KeyZ"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(api.engine.junoInputNotes.has("60:computer-KeyZ"), "DIRECTO enables the original QWERTY mapping");
+  api.switchTab("juno");
+  api.handleComputerJunoKeyUp(event("KeyZ"));
+  assert.equal(api.engine.junoInputNotes.has("60:computer-KeyZ"), false, "keyup stays the single release owner across tabs");
+  api.switchTab("directo");
+  assert.equal(directKeyboard.listenerCount("pointerdown"), 1, "tab changes never add pointer listeners");
+
+  api.toggleBassFollow();
+  const c4 = directKey(60);
+  directKeyboard.dispatch("pointerdown", pointer(c4, 7));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(api.engine.junoInputNotes.has("60:direct-pointer-7"), "DIRECTO Pointer Events write the authoritative J-4 input map");
+  assert.equal(api.state.bassFollow.pendingRootMidi, 60, "BASS FOLLOW receives the DIRECTO note source");
+  directKeyboard.dispatch("pointerup", pointer(c4, 7));
+  assert.equal(api.engine.junoInputNotes.has("60:direct-pointer-7"), false);
+
+  api.state.juno.arp.enabled = true;
+  api.state.juno.arp.hold = false;
+  const e4 = directKey(64);
+  directKeyboard.dispatch("pointerdown", pointer(e4, 8));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(Array.from(api.getJunoArpNotes()), [64], "ARP without HOLD reads the same DIRECTO input note");
+  directKeyboard.dispatch("pointerup", pointer(e4, 8));
+
+  api.state.juno.arp.hold = true;
+  api.engine.junoArpAwaitingChord = true;
+  api.engine.junoLatchedNotes.clear();
+  const g4 = directKey(67);
+  directKeyboard.dispatch("pointerdown", pointer(g4, 9));
+  await new Promise((resolve) => setImmediate(resolve));
+  directKeyboard.dispatch("pointerup", pointer(g4, 9));
+  assert.deepEqual(Array.from(api.engine.junoLatchedNotes.values(), (note) => note.midi), [67], "ARP HOLD retains the same DIRECTO note ownership after release");
+});
+
+test("DIRECTO J-4 pointers are released by real focus cleanup but not internal tab changes", async () => {
+  const api = setup();
+  await api.engine.init();
+  api.bindJunoControls();
+  const directKeyboard = api.elements.get("directJunoKeyboard");
+  const c4 = {
+    dataset: { junoMidi: "60" }, setPointerCapture() {},
+    closest(selector) { return selector === ".juno-key" ? this : null; },
+  };
+  const pointer = (pointerId) => ({ target: c4, pointerId, preventDefault() {} });
+
+  api.switchTab("directo");
+  directKeyboard.dispatch("pointerdown", pointer(9));
+  await new Promise((resolve) => setImmediate(resolve));
+  api.switchTab("juno");
+  assert.ok(api.engine.junoInputNotes.has("60:direct-pointer-9"), "internal tabs preserve a held DIRECTO note");
+  api.dispatchWindowEvent("blur");
+  assert.equal(api.engine.junoInputNotes.has("60:direct-pointer-9"), false, "window blur releases the held DIRECTO pointer");
+
+  api.switchTab("directo");
+  directKeyboard.dispatch("pointerdown", pointer(10));
+  await new Promise((resolve) => setImmediate(resolve));
+  api.stopTransport();
+  assert.equal(api.engine.junoInputNotes.has("60:direct-pointer-10"), false, "STOP clears the shared DIRECTO input state");
+
+  directKeyboard.dispatch("pointerdown", pointer(11));
+  await new Promise((resolve) => setImmediate(resolve));
+  api.document.visibilityState = "hidden";
+  await api.handleVisibilityChange();
+  assert.equal(api.engine.junoInputNotes.has("60:direct-pointer-11"), false, "hidden documents release the held DIRECTO pointer");
+});
+
+test("DIRECTO keeps slider pointers and J-4 pointer owners independent", async () => {
+  const makeRange = (value) => {
+    const listeners = new Map();
+    return {
+      value: String(value), min: "0", max: "16000", style: { setProperty() {} },
+      addEventListener(type, listener) { listeners.set(type, listener); }, listeners,
+    };
+  };
+  const bassInput = makeRange(900);
+  const resonanceInput = makeRange(4.5);
+  const output = () => ({ textContent: "" });
+  const directControl = (name, input) => ({
+    dataset: { directControl: name },
+    querySelector(selector) { return selector === "input" ? input : output(); },
+  });
+  const api = setup({ directControls: [directControl("bassCutoff", bassInput), directControl("junoResonance", resonanceInput)] });
+  await api.engine.init();
+  api.bindJunoControls();
+  api.bindDirectControls();
+  const directKeyboard = api.elements.get("directJunoKeyboard");
+  const key = (midi) => ({ dataset: { junoMidi: String(midi) }, setPointerCapture() {}, closest() { return this; } });
+  const pointer = (target, pointerId) => ({ target, pointerId, preventDefault() {} });
+  const c4 = key(60);
+  const e4 = key(64);
+
+  directKeyboard.dispatch("pointerdown", pointer(c4, 21));
+  directKeyboard.dispatch("pointerdown", pointer(e4, 22));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(api.engine.junoInputNotes.has("60:direct-pointer-21"));
+  assert.ok(api.engine.junoInputNotes.has("64:direct-pointer-22"), "two keyboard pointers own independent J-4 notes");
+
+  bassInput.value = "1300";
+  bassInput.listeners.get("input")();
+  resonanceInput.value = "8.5";
+  resonanceInput.listeners.get("input")();
+  bassInput.listeners.get("pointercancel")();
+  assert.equal(api.state.synth.cutoff, 1300, "one slider can cancel/flush without touching another gesture");
+  assert.ok(api.engine.junoInputNotes.has("60:direct-pointer-21"));
+  assert.ok(api.engine.junoInputNotes.has("64:direct-pointer-22"), "slider cancellation does not cancel held J-4 pointers");
+  resonanceInput.listeners.get("pointerup")();
+  assert.equal(api.state.juno.resonance, 8.5, "the second slider retains and applies its own final value");
+
+  directKeyboard.dispatch("pointerup", pointer(c4, 21));
+  assert.equal(api.engine.junoInputNotes.has("60:direct-pointer-21"), false);
+  assert.ok(api.engine.junoInputNotes.has("64:direct-pointer-22"), "releasing one J-4 pointer preserves the other");
+  directKeyboard.dispatch("pointercancel", pointer(e4, 22));
+  assert.equal(api.engine.junoInputNotes.size, 0, "each pointercancel releases only its matching note owner");
+  assert.equal(api.callbacks.size, 0, "concurrent DIRECTO gestures add no polling or lingering RAF callbacks");
 });
 
 test("a live held J-4 voice survives switchTab fx until its matching keyup", async () => {

@@ -2918,6 +2918,7 @@ const dom = {
   bassAccent: document.getElementById("bassAccentToggle"),
   bassSlide: document.getElementById("bassSlideToggle"),
   junoKeyboard: document.getElementById("junoKeyboard"),
+  directJunoKeyboard: document.getElementById("directJunoKeyboard"),
   junoVoiceLeds: document.getElementById("junoVoiceLeds"),
   junoArpStatus: document.getElementById("junoArpStatus"),
   fxChannelNumber: document.getElementById("fxChannelNumber"),
@@ -3093,22 +3094,28 @@ function renderBassEditor() {
   renderNoteKeyboard();
 }
 
-function renderJunoKeyboard() {
-  if (!dom.junoKeyboard) return;
-  dom.junoKeyboard.replaceChildren();
+function renderJunoKeyboardRange(keyboard, startMidi, count, shortcutLabels = false) {
+  if (!keyboard) return;
+  keyboard.replaceChildren();
   const bed = document.createElement("div");
-  bed.className = "piano-bed juno-piano-bed";
-  for (let midi = 60; midi < 84; midi += 1) {
+  bed.className = `piano-bed ${count === 12 ? "direct-juno-piano-bed" : "juno-piano-bed"}`;
+  for (let midi = startMidi; midi < startMidi + count; midi += 1) {
     const button = document.createElement("button");
     button.type = "button";
-    const isBlack = configurePianoKey(button, midi, 60, 2);
+    const isBlack = configurePianoKey(button, midi, startMidi, count / 12);
     button.className = `juno-key piano-key${isBlack ? " is-black" : ""}`;
     button.dataset.junoMidi = String(midi);
     button.setAttribute("aria-label", `Tocar ${midiToName(midi)} en J-4`);
-    appendPianoLabels(button, midiToName(midi), COMPUTER_JUNO_LABELS.get(midi));
+    appendPianoLabels(button, midiToName(midi), shortcutLabels ? COMPUTER_JUNO_LABELS.get(midi) : "");
     bed.append(button);
   }
-  dom.junoKeyboard.append(bed);
+  keyboard.append(bed);
+}
+
+function renderJunoKeyboard() {
+  renderJunoKeyboardRange(dom.junoKeyboard, 60, 24, true);
+  renderJunoKeyboardRange(dom.directJunoKeyboard, 60, 12);
+  syncAllJunoKeyVisuals();
 }
 
 function renderJunoVoiceLeds() {
@@ -3390,55 +3397,76 @@ function bindJunoControls() {
       rangeFill(input);
     });
   });
-  if (dom.junoKeyboard) {
+  const bindJunoKeyboard = (keyboard, ownerPrefix) => {
+    if (!keyboard) return;
     const release = (button, pointerId) => {
       if (!button) return;
       const midi = Number(button.dataset.junoMidi);
-      button.classList.remove("is-held");
-      engine.releaseJunoKey(midi, pointerId);
+      engine.releaseJunoKey(midi, `${ownerPrefix}${pointerId}`);
+      syncJunoKeyVisual(midi);
     };
-    dom.junoKeyboard.addEventListener("pointerdown", (event) => {
+    keyboard.addEventListener("pointerdown", (event) => {
       const button = event.target.closest(".juno-key");
       if (!button) return;
       event.preventDefault();
       button.setPointerCapture?.(event.pointerId);
-      button.classList.add("is-held");
-      engine.pressJunoKey(Number(button.dataset.junoMidi), event.pointerId).catch(() => {});
+      const midi = Number(button.dataset.junoMidi);
+      setJunoKeyVisual(midi, true);
+      engine.pressJunoKey(midi, `${ownerPrefix}${event.pointerId}`).catch(() => syncJunoKeyVisual(midi));
     });
     ["pointerup", "pointercancel", "lostpointercapture"].forEach((type) => {
-      dom.junoKeyboard.addEventListener(type, (event) => release(event.target.closest(".juno-key"), event.pointerId));
+      keyboard.addEventListener(type, (event) => release(event.target.closest(".juno-key"), event.pointerId));
     });
-    dom.junoKeyboard.addEventListener("keydown", (event) => {
+    keyboard.addEventListener("keydown", (event) => {
       const button = event.target.closest(".juno-key");
       if (!button || !["Enter", " "].includes(event.key) || event.repeat) return;
       event.preventDefault();
-      button.classList.add("is-held");
-      engine.pressJunoKey(Number(button.dataset.junoMidi), `key-${button.dataset.junoMidi}`).catch(() => {});
+      const midi = Number(button.dataset.junoMidi);
+      const keyOwner = `${ownerPrefix}key-${midi}`;
+      setJunoKeyVisual(midi, true);
+      engine.pressJunoKey(midi, keyOwner).catch(() => syncJunoKeyVisual(midi));
     });
-    dom.junoKeyboard.addEventListener("keyup", (event) => {
+    keyboard.addEventListener("keyup", (event) => {
       const button = event.target.closest(".juno-key");
       if (!button || !["Enter", " "].includes(event.key)) return;
       event.preventDefault();
       release(button, `key-${button.dataset.junoMidi}`);
     });
-  }
+  };
+  bindJunoKeyboard(dom.junoKeyboard, "juno-pointer-");
+  bindJunoKeyboard(dom.directJunoKeyboard, "direct-pointer-");
   document.addEventListener("keydown", handleComputerJunoKeyDown);
   document.addEventListener("keyup", handleComputerJunoKeyUp);
-  window.addEventListener("blur", releaseAllComputerJunoKeys);
+  window.addEventListener("blur", releaseAllJunoInputKeys);
   renderJunoControls();
 }
 
 function computerKeyboardTargetIsEditable(target) {
-  return ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName) || Boolean(target?.isContentEditable);
+  // Range inputs do not accept text entry, so keeping the J-4 mapping active
+  // while one has focus lets a performer adjust a control and play QWERTY.
+  // Text fields and selects retain their normal keyboard editing semantics.
+  if (target?.tagName === "INPUT") return target.type !== "range";
+  return ["TEXTAREA", "SELECT"].includes(target?.tagName) || Boolean(target?.isContentEditable);
 }
 
 function setJunoKeyVisual(midi, held) {
-  dom.junoKeyboard?.querySelector(`[data-juno-midi="${midi}"]`)?.classList.toggle("is-held", held);
+  [dom.junoKeyboard, dom.directJunoKeyboard].forEach((keyboard) => {
+    keyboard?.querySelector(`[data-juno-midi="${midi}"]`)?.classList.toggle("is-held", held);
+  });
+}
+
+function syncJunoKeyVisual(midi) {
+  const held = [...engine.junoInputNotes.values()].some((note) => note.midi === midi);
+  setJunoKeyVisual(midi, held);
+}
+
+function syncAllJunoKeyVisuals() {
+  for (let midi = 60; midi < 84; midi += 1) syncJunoKeyVisual(midi);
 }
 
 function handleComputerJunoKeyDown(event) {
   const midi = COMPUTER_JUNO_KEYS.get(event.code);
-  if (activeTab !== "juno" || midi === undefined || event.repeat || event.metaKey || event.ctrlKey || event.altKey
+  if ((activeTab !== "juno" && activeTab !== "directo") || midi === undefined || event.repeat || event.metaKey || event.ctrlKey || event.altKey
     || computerKeyboardTargetIsEditable(event.target) || computerJunoHeld.has(event.code)) return;
   event.preventDefault();
   computerJunoHeld.set(event.code, midi);
@@ -3453,8 +3481,8 @@ function releaseComputerJunoKey(code) {
   const midi = computerJunoHeld.get(code);
   if (midi === undefined) return;
   computerJunoHeld.delete(code);
-  setJunoKeyVisual(midi, false);
   engine.releaseJunoKey(midi, `computer-${code}`);
+  syncJunoKeyVisual(midi);
 }
 
 function handleComputerJunoKeyUp(event) {
@@ -3465,6 +3493,23 @@ function handleComputerJunoKeyUp(event) {
 
 function releaseAllComputerJunoKeys() {
   [...computerJunoHeld.keys()].forEach(releaseComputerJunoKey);
+}
+
+function releaseAllJunoInputKeys() {
+  releaseAllComputerJunoKeys();
+  const pendingOrHeld = new Set([...engine.junoPreviewRequests.keys(), ...engine.junoInputNotes.keys()]);
+  pendingOrHeld.forEach((key) => {
+    const separator = key.indexOf(":");
+    const midi = Number(key.slice(0, separator));
+    const owner = key.slice(separator + 1);
+    // Keep ARP's retained/internal ownership intact; only release real keys
+    // that can otherwise become physically stuck after focus is lost.
+    const interactiveOwner = /^\d+$/.test(owner) || owner.startsWith("key-")
+      || owner.startsWith("juno-pointer-") || owner.startsWith("direct-pointer-") || owner.startsWith("direct-key-");
+    if (!Number.isFinite(midi) || separator < 0 || !interactiveOwner) return;
+    engine.releaseJunoKey(midi, owner);
+    syncJunoKeyVisual(midi);
+  });
 }
 
 function renderPlayhead(step) {
@@ -3755,6 +3800,7 @@ function stopTransport() {
   state.starting = false;
   resetSnareBreak();
   engine.stopVoices();
+  syncAllJunoKeyVisuals();
   if (schedulerTimer) window.clearInterval(schedulerTimer);
   schedulerTimer = null;
   if (playheadAnimationFrame !== null) window.cancelAnimationFrame(playheadAnimationFrame);
@@ -4838,7 +4884,7 @@ async function handleVisibilityChange() {
   updateMeterAnimation();
   if (document.visibilityState !== "visible") {
     // Internal tabs do not release keys; actual document invisibility does.
-    releaseAllComputerJunoKeys();
+    releaseAllJunoInputKeys();
     return;
   }
   if (document.visibilityState === "visible" && state.playing) {
