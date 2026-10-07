@@ -8,6 +8,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../dist/sw.js"), "utf8");
 const indexSource = fs.readFileSync(path.join(__dirname, "../dist/index.html"), "utf8");
+const appSource = fs.readFileSync(path.join(__dirname, "../dist/app.js"), "utf8");
 const scope = "https://example.github.io/volt16/";
 
 function setup(caches) {
@@ -40,6 +41,8 @@ test("activation preserves other apps and other VOLT/16 installations on the sam
     `volt16:${scope}:shell-v14`,
     `volt16:${scope}:shell-v15`,
     `volt16:${scope}:shell-v16`,
+    `volt16:${scope}:shell-v17`,
+    `volt16:${scope}:shell-v18`,
     "habit-quest-v1",
     "volt16:https://example.github.io/another-volt16/:shell-v5",
   ];
@@ -48,7 +51,7 @@ test("activation preserves other apps and other VOLT/16 installations on the sam
   let activation;
   handlers.activate({ waitUntil: (promise) => { activation = promise; } });
   await activation;
-  assert.deepEqual(removed, [`volt16:${scope}:shell-v5`, `volt16:${scope}:shell-v6`, `volt16:${scope}:shell-v7`, `volt16:${scope}:shell-v8`, `volt16:${scope}:shell-v9`, `volt16:${scope}:shell-v10`, `volt16:${scope}:shell-v11`, `volt16:${scope}:shell-v12`, `volt16:${scope}:shell-v13`, `volt16:${scope}:shell-v14`, `volt16:${scope}:shell-v15`, `volt16:${scope}:shell-v16`]);
+  assert.deepEqual(removed, [`volt16:${scope}:shell-v5`, `volt16:${scope}:shell-v6`, `volt16:${scope}:shell-v7`, `volt16:${scope}:shell-v8`, `volt16:${scope}:shell-v9`, `volt16:${scope}:shell-v10`, `volt16:${scope}:shell-v11`, `volt16:${scope}:shell-v12`, `volt16:${scope}:shell-v13`, `volt16:${scope}:shell-v14`, `volt16:${scope}:shell-v15`, `volt16:${scope}:shell-v16`, `volt16:${scope}:shell-v17`, `volt16:${scope}:shell-v18`]);
 });
 
 test("offline requests read only this installation's cache", async () => {
@@ -65,12 +68,15 @@ test("offline requests read only this installation's cache", async () => {
   let response;
   handlers.fetch({ request, respondWith: (promise) => { response = promise; } });
   assert.equal(await response, cached);
-  assert.deepEqual(opened, [`volt16:${scope}:shell-v18`]);
+  assert.deepEqual(opened, [`volt16:${scope}:shell-v19`]);
 });
 
-test("visible version, application script, and service-worker shell use r13.1.3 consistently", () => {
-  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.1\.3/);
-  assert.match(indexSource, /<script src="\.\/app\.js\?v=18"><\/script>/);
-  assert.match(source, /shell-v18/);
-  assert.match(source, /"\.\/app\.js\?v=18"/);
+test("visible version and PWA resources use r13.2.0 consistently", () => {
+  assert.match(indexSource, /VOLT\/16 · AUDIO r13\.2\.0/);
+  assert.match(indexSource, /<link rel="stylesheet" href="\.\/styles\.css\?v=19" \/>/);
+  assert.match(indexSource, /<script src="\.\/app\.js\?v=19"><\/script>/);
+  assert.match(appSource, /serviceWorker\.register\("\.\/sw\.js\?v=19"\)/);
+  assert.match(source, /shell-v19/);
+  assert.match(source, /"\.\/styles\.css\?v=19"/);
+  assert.match(source, /"\.\/app\.js\?v=19"/);
 });

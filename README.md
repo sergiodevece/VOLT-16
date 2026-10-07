@@ -1,6 +1,6 @@
 # VOLT/16
 
-Groovebox para móvil y ordenador: batería de inspiración 808, bajo monofónico, polisinte J-4 de cuatro voces y dos secuenciadores de 16 pasos. El audio se genera en el navegador con Web Audio, sin muestras ni servidor de audio.
+Groovebox orientada principalmente a escritorio: batería de inspiración 808, bajo monofónico, polisinte J-4 de cuatro voces y dos secuenciadores de 16 pasos. El audio se genera en el navegador con Web Audio, sin muestras ni servidor de audio. La PWA también está disponible para pruebas en móvil y tablet; la compatibilidad y el rendimiento dependen del navegador y del dispositivo.
 
 **[Abrir VOLT/16 en Netlify](https://volt-16-live-drum-machine-synth-bass.netlify.app/)** · [Código en GitHub](https://github.com/sergiodevece/VOLT-16)
 
@@ -9,8 +9,9 @@ Groovebox para móvil y ordenador: batería de inspiración 808, bajo monofónic
 1. Abre la app y pulsa **PLAY** para iniciar el audio.
 2. Programa los pasos en **BATERÍA** y **BAJO**; ajusta el sonido del bajo en **SÍNTESIS**.
 3. En **JUNO**, toca el J-4 polifónico desde su piano de dos octavas o con el teclado del ordenador. El ARP-5 ofrece cinco recorridos, HOLD, 1–3 octavas, GATE y cuatro divisiones sincronizadas.
-4. En **MEZCLA**, ajusta volumen, panorama, compresión y ecualización de cada canal.
-5. En **FX**, selecciona el canal y ajusta sus envíos a los efectos.
+4. En **DIRECTO**, toca el teclado J-4 multitouch, ajusta los controles esenciales y usa **BASS FOLLOW** para que las notas futuras del patrón de bajo sigan la fundamental del acorde interpretado.
+5. En **MEZCLA**, ajusta volumen, panorama, compresión y ecualización de cada canal.
+6. En **FX**, selecciona el canal y ajusta sus envíos a los efectos.
 
 Durante la reproducción, editar batería o bajo modifica el patrón sin disparar golpes o notas adicionales. En pausa se pueden preescuchar ambos.
 
@@ -20,6 +21,7 @@ Durante la reproducción, editar batería o bajo modifica el patrón sin dispara
 - Bajo: oscilador, suboscilador, filtro, envolvente, acento, slide y Auto Cutoff sincronizado al BPM.
 - J-4: cuatro voces, saw, pulse con PWM, suboscilador, HPF, filtro de 24 dB, ADSR, LFO y chorus estéreo OFF/I/II/I+II. En Mac/PC, las filas Z–M y Q–U permiten tocar dos octavas polifónicamente.
 - ARP-5: modos UP, DOWN, UP/DOWN, RANDOM y ORDER; 1–3 octavas, HOLD, GATE y divisiones 1/4, 1/8, 1/8T y 1/16. Se ejecuta desde el reloj anticipado de audio y comienza con PLAY.
+- DIRECTO: teclado compacto J-4 con entrada multitouch, controles esenciales, mutes con fundido, BREAK SNARE y BASS FOLLOW. El seguimiento toma la fundamental del acorde J-4 o retenido por HOLD y transpone solo las notas de bajo programadas en el futuro.
 - Los editores de nota del bajo y del J-4 usan teclados de piano con blancas y negras superpuestas; en el bajo, cada tecla sigue asignando la nota al paso seleccionado.
 - Tempo, tap tempo y swing.
 - Por canal: compresor de inspiración óptica con gain y peak reduction; EQ con pasa altos, pasa bajos y dos shelving.
@@ -61,7 +63,7 @@ node --test tests/*.test.cjs
 
 Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco efectos, STOP y `pagehide`, continuidad de envolventes, gestión de notas, recuperación del secuenciador y aislamiento de la caché. Incluyen diez minutos simulados a 190 BPM, los cinco efectos activos en los siete canales y pruebas específicas del J-4 y ARP-5: creación diferida, cuatro voces, robo de voz, 4.000 cambios de parámetros, modos, octavas, tresillos, GATE, HOLD y limpieza completa. Son simulaciones de gestión de recursos y señal; no miden la RAM ni los cortes del hilo de audio de Safari/Chrome. La escucha en dispositivos reales sigue siendo necesaria.
 
-## Arquitectura de audio r13.1.3
+## Arquitectura de audio r13.2.0
 
 - ARP-5 mantiene separados el teclado físico, el acorde retenido por HOLD y las voces de audio. Así, soltar teclas no corta un acorde retenido y STOP puede retirar todas las voces sin dejar fuentes programadas.
 - Su reloj usa el mismo planificador anticipado del `AudioContext` que batería y bajo, pero conserva un contador propio para representar exactamente divisiones como 1/8T. `GATE` determina la duración como fracción del intervalo, sin temporizadores de interfaz ni saltos de ganancia.
@@ -73,6 +75,7 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - Los parámetros de una voz viva reutilizan sus nodos y sustituyen automatizaciones anteriores. Release conserva el nivel alcanzado antes de caer y STOP elimina voces, moduladores, conexiones y temporizadores.
 - El chorus propio del J-4 es estéreo y se mantiene separado del chorus de envío. El canal 07 pasa después por la misma cadena de procesador, volumen, panorama y FX independientes que el resto de la mesa.
 - El teclado del ordenador identifica posiciones físicas (`KeyboardEvent.code`) para que el mapa musical no dependa del idioma configurado. Ignora repeticiones, modificadores y campos editables, y libera todas las notas si la ventana pierde el foco o se abandona la pestaña JUNO.
+- El teclado compacto J-4 de DIRECTO comparte la propiedad de notas con el teclado principal y admite varios punteros simultáneos sin duplicar voces ni interferir con los sliders. BASS FOLLOW conserva la fundamental del acorde interpretado —incluido HOLD— y solo transpone pasos de bajo que todavía no se han programado en el reloj de audio.
 
 - El master sigue exactamente esta ruta: **mezcla completa → limitador opcional → EQ creativo de cuatro filtros → volumen master → medidor → salida**.
 - El limitador arranca apagado para que el master pueda trabajar sin limitar. Al activarlo ofrece threshold, attack, release y ceiling pre-EQ; su bypass cambia mediante una transición corta, sin reconectar el grafo de audio.
@@ -94,4 +97,4 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - El filtro del delay usa una Q sin resonancia para que el feedback máximo permitido no amplifique sucesivamente algunas frecuencias. En los filtros lowpass/highpass de Web Audio, Q se expresa en dB: [especificación de los filtros](https://www.w3.org/TR/webaudio/#filters-characteristics).
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
-Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.1.3**. En JUNO, activa ARP, mantén un acorde y pulsa PLAY; deja `1/16` funcionando varios minutos y después recorre los cinco modos, las cuatro divisiones y 1–3 octavas. Activa HOLD, suelta el acorde y toca otro: el segundo debe sustituir al primero. Mueve GATE durante la reproducción y comprueba que cambia la articulación sin clics. Después haz varios ciclos PLAY/STOP: no debe quedar ninguna nota, salto ni crujido. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
+Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.2.0**. En DIRECTO, toca acordes multitouch en el teclado J-4, activa BASS FOLLOW y comprueba que el patrón de bajo sigue la fundamental sin alterar notas ya programadas. Repite con ARP y HOLD, prueba FX y cambia varias veces de pestaña. Después haz varios ciclos PLAY/STOP: no debe quedar ninguna nota, salto ni crujido. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
