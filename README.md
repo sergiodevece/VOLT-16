@@ -98,3 +98,7 @@ Las pruebas comprueban aislamiento por canal, lifecycle y cleanup de los cinco e
 - El osciloscopio reutiliza su buffer, los medidores se actualizan como máximo a 30 fps y su animación se detiene cuando no están visibles. Editar un paso de batería actualiza solamente ese botón.
 
 Para la prueba auditiva, confirma que el pie de la app muestra **AUDIO r13.2.0**. En DIRECTO, toca acordes multitouch en el teclado J-4, activa BASS FOLLOW y comprueba que el patrón de bajo sigue la fundamental sin alterar notas ya programadas. Repite con ARP y HOLD, prueba FX y cambia varias veces de pestaña. Después haz varios ciclos PLAY/STOP: no debe quedar ninguna nota, salto ni crujido. Si aparece alguno, anota dispositivo, navegador, ajuste y momento exacto.
+
+---
+
+**Autor:** Sergio Devece · SerxDev — [Portfolio](https://serxdev.org)
